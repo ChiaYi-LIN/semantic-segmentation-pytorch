@@ -4,10 +4,11 @@ import time
 # import math
 import random
 import argparse
-from distutils.version import LooseVersion
+from packaging.version import Version
 # Numerical libs
 import torch
 import torch.nn as nn
+from tqdm import tqdm
 # Our libs
 from mit_semseg.config import cfg
 from mit_semseg.dataset import TrainDataset
@@ -27,7 +28,7 @@ def train(segmentation_module, iterator, optimizers, history, epoch, cfg):
 
     # main loop
     tic = time.time()
-    for i in range(cfg.TRAIN.epoch_iters):
+    for i in tqdm(range(cfg.TRAIN.epoch_iters)):
         # load a batch of data
         batch_data = next(iterator)
         data_time.update(time.time() - tic)
@@ -38,6 +39,10 @@ def train(segmentation_module, iterator, optimizers, history, epoch, cfg):
         adjust_learning_rate(optimizers, cur_iter, cfg)
 
         # forward pass
+        batch_data = {
+            'img_data' : batch_data[0]['img_data'].to('cuda'),
+            'seg_label' : batch_data[0]['seg_label'].to('cuda'),
+        }
         loss, acc = segmentation_module(batch_data)
         loss = loss.mean()
         acc = acc.mean()
@@ -150,6 +155,8 @@ def main(cfg, gpus):
         fc_dim=cfg.MODEL.fc_dim,
         num_class=cfg.DATASET.num_class,
         weights=cfg.MODEL.weights_decoder)
+    # logger.info(f"Encoder arch:\n{net_encoder}")  
+    # logger.info(f"Decoder arch:\n{net_decoder}")
 
     crit = nn.NLLLoss(ignore_index=-1)
 
@@ -187,7 +194,7 @@ def main(cfg, gpus):
             device_ids=gpus)
         # For sync bn
         patch_replication_callback(segmentation_module)
-    segmentation_module.cuda()
+    segmentation_module.to('cuda')
 
     # Set up optimizers
     nets = (net_encoder, net_decoder, crit)
@@ -206,7 +213,7 @@ def main(cfg, gpus):
 
 
 if __name__ == '__main__':
-    assert LooseVersion(torch.__version__) >= LooseVersion('0.4.0'), \
+    assert Version(torch.__version__) >= Version('0.4.0'), \
         'PyTorch>=0.4.0 is required'
 
     parser = argparse.ArgumentParser(
@@ -214,7 +221,7 @@ if __name__ == '__main__':
     )
     parser.add_argument(
         "--cfg",
-        default="config/ade20k-resnet50dilated-ppm_deepsup.yaml",
+        default="config/ade20k-resnet18-ppm.yaml",
         metavar="FILE",
         help="path to config file",
         type=str,
@@ -262,6 +269,7 @@ if __name__ == '__main__':
     gpus = [int(x) for x in gpus]
     num_gpus = len(gpus)
     cfg.TRAIN.batch_size = num_gpus * cfg.TRAIN.batch_size_per_gpu
+    logger.info(f"Using gpus: {gpus}. Batch size per gpu: {cfg.TRAIN.batch_size_per_gpu}. Total batch size: {cfg.TRAIN.batch_size}.")
 
     cfg.TRAIN.max_iters = cfg.TRAIN.epoch_iters * cfg.TRAIN.num_epoch
     cfg.TRAIN.running_lr_encoder = cfg.TRAIN.lr_encoder
