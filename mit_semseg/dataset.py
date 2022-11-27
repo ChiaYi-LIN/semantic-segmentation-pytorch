@@ -8,11 +8,11 @@ from PIL import Image
 
 def imresize(im, size, interp='bilinear'):
     if interp == 'nearest':
-        resample = Image.NEAREST
+        resample = Image.Resampling.NEAREST
     elif interp == 'bilinear':
-        resample = Image.BILINEAR
+        resample = Image.Resampling.BILINEAR
     elif interp == 'bicubic':
-        resample = Image.BICUBIC
+        resample = Image.Resampling.BICUBIC
     else:
         raise Exception('resample method undefined!')
 
@@ -31,9 +31,12 @@ class BaseDataset(torch.utils.data.Dataset):
         self.parse_input_list(odgt, **kwargs)
 
         # mean and std
-        self.normalize = transforms.Normalize(
-            mean=[0.485, 0.456, 0.406],
-            std=[0.229, 0.224, 0.225])
+        self.img_preprocess = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize(
+                mean=[0.485, 0.456, 0.406], # These are RGB mean+std values
+                std=[0.229, 0.224, 0.225])  # across a large photo dataset.
+        ])
 
     def parse_input_list(self, odgt, max_sample=-1, start_idx=-1, end_idx=-1):
         if isinstance(odgt, list):
@@ -51,10 +54,8 @@ class BaseDataset(torch.utils.data.Dataset):
         print('# samples: {}'.format(self.num_sample))
 
     def img_transform(self, img):
-        # 0-255 to 0-1
-        img = np.float32(np.array(img)) / 255.
-        img = img.transpose((2, 0, 1))
-        img = self.normalize(torch.from_numpy(img.copy()))
+        # 0-255 to 0-1, and then normalize
+        img = self.img_preprocess(img)
         return img
 
     def segm_transform(self, segm):
@@ -165,23 +166,24 @@ class TrainDataset(BaseDataset):
 
             # random_flip
             if np.random.choice([0, 1]):
-                img = img.transpose(Image.FLIP_LEFT_RIGHT)
-                segm = segm.transpose(Image.FLIP_LEFT_RIGHT)
+                img = img.transpose(Image.Transpose.FLIP_LEFT_RIGHT)
+                segm = segm.transpose(Image.Transpose.FLIP_LEFT_RIGHT)
 
             # note that each sample within a mini batch has different scale param
             img = imresize(img, (batch_widths[i], batch_heights[i]), interp='bilinear')
             segm = imresize(segm, (batch_widths[i], batch_heights[i]), interp='nearest')
 
             # further downsample seg label, need to avoid seg label misalignment
-            segm_rounded_width = self.round2nearest_multiple(segm.size[0], self.segm_downsampling_rate)
-            segm_rounded_height = self.round2nearest_multiple(segm.size[1], self.segm_downsampling_rate)
-            segm_rounded = Image.new('L', (segm_rounded_width, segm_rounded_height), 0)
-            segm_rounded.paste(segm, (0, 0))
-            segm = imresize(
-                segm_rounded,
-                (segm_rounded.size[0] // self.segm_downsampling_rate, \
-                 segm_rounded.size[1] // self.segm_downsampling_rate), \
-                interp='nearest')
+            if self.segm_downsampling_rate > 1:
+                segm_rounded_width = self.round2nearest_multiple(segm.size[0], self.segm_downsampling_rate)
+                segm_rounded_height = self.round2nearest_multiple(segm.size[1], self.segm_downsampling_rate)
+                segm_rounded = Image.new('L', (segm_rounded_width, segm_rounded_height), 0)
+                segm_rounded.paste(segm, (0, 0))
+                segm = imresize(
+                    segm_rounded,
+                    (segm_rounded.size[0] // self.segm_downsampling_rate, \
+                    segm_rounded.size[1] // self.segm_downsampling_rate), \
+                    interp='nearest')
 
             # image transform, to torch float tensor 3xHxW
             img = self.img_transform(img)
@@ -294,3 +296,15 @@ class TestDataset(BaseDataset):
 
     def __len__(self):
         return self.num_sample
+
+if __name__ == "__main__":
+    from config import cfg
+    cfg.merge_from_file("./config/ade20k-resnet50dilated-ppm_deepsup.yaml")
+    dataset_train = TrainDataset(
+        cfg.DATASET.root_dataset,
+        cfg.DATASET.list_train,
+        cfg.DATASET,
+        batch_per_gpu=cfg.TRAIN.batch_size_per_gpu)
+    
+    print(dataset_train[0]["img_data"].shape)
+    print(dataset_train[0]["seg_label"].shape)
