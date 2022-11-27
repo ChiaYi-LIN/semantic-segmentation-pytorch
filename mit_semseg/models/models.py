@@ -29,21 +29,26 @@ class SegmentationModule(SegmentationModuleBase):
     def forward(self, feed_dict, *, segSize=None):
         # training
         if segSize is None:
+            img_data = feed_dict['img_data']
+            seg_label = feed_dict['seg_label']
+            encode_feats = self.encoder(img_data, return_feature_maps=True)
             if self.deep_sup_scale is not None: # use deep supervision technique
-                (pred, pred_deepsup) = self.decoder(self.encoder(feed_dict['img_data'], return_feature_maps=True))
+                (pred, pred_deepsup) = self.decoder(encode_feats)
             else:
-                pred = self.decoder(self.encoder(feed_dict['img_data'], return_feature_maps=True))
-
-            loss = self.crit(pred, feed_dict['seg_label'])
+                pred = self.decoder(encode_feats, segSize=(seg_label.shape[1], seg_label.shape[2]))
+            
             if self.deep_sup_scale is not None:
-                loss_deepsup = self.crit(pred_deepsup, feed_dict['seg_label'])
-                loss = loss + loss_deepsup * self.deep_sup_scale
+                loss = self.crit(pred, seg_label) + self.deep_sup_scale * self.crit(pred_deepsup, seg_label)
+            else:
+                loss = self.crit(pred, seg_label)
 
-            acc = self.pixel_acc(pred, feed_dict['seg_label'])
+            acc = self.pixel_acc(pred, seg_label)
             return loss, acc
         # inference
         else:
-            pred = self.decoder(self.encoder(feed_dict['img_data'], return_feature_maps=True), segSize=segSize)
+            img_data = feed_dict['img_data']
+            encode_feats = self.encoder(feed_dict['img_data'], return_feature_maps=True)
+            pred = self.decoder(encode_feats, segSize=segSize)
             return pred
 
 
@@ -422,6 +427,10 @@ class PPM(nn.Module):
                 (input_size[2], input_size[3]),
                 mode='bilinear', align_corners=False))
         ppm_out = torch.cat(ppm_out, 1)
+
+        if segSize is not None:
+            ppm_out = nn.functional.interpolate(
+                ppm_out, size=segSize, mode='bilinear', align_corners=False)
 
         x = self.conv_last(ppm_out)
 
