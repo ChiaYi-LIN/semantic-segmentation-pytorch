@@ -8,7 +8,6 @@ from packaging.version import Version
 # Numerical libs
 import torch
 import torch.nn as nn
-from tqdm import tqdm
 # Our libs
 from mit_semseg.config import cfg
 from mit_semseg.dataset import TrainDataset
@@ -28,7 +27,7 @@ def train(segmentation_module, iterator, optimizers, history, epoch, cfg):
 
     # main loop
     tic = time.time()
-    for i in tqdm(range(cfg.TRAIN.epoch_iters)):
+    for i in range(cfg.TRAIN.epoch_iters):
         # load a batch of data
         batch_data = next(iterator)
         data_time.update(time.time() - tic)
@@ -39,10 +38,6 @@ def train(segmentation_module, iterator, optimizers, history, epoch, cfg):
         adjust_learning_rate(optimizers, cur_iter, cfg)
 
         # forward pass
-        batch_data = {
-            'img_data' : batch_data[0]['img_data'].to('cuda'),
-            'seg_label' : batch_data[0]['seg_label'].to('cuda'),
-        }
         loss, acc = segmentation_module(batch_data)
         loss = loss.mean()
         acc = acc.mean()
@@ -62,13 +57,10 @@ def train(segmentation_module, iterator, optimizers, history, epoch, cfg):
 
         # calculate accuracy, and display
         if i % cfg.TRAIN.disp_iter == 0:
-            print('Epoch: [{}][{}/{}], Time: {:.2f}, Data: {:.2f}, '
-                  'lr_encoder: {:.6f}, lr_decoder: {:.6f}, '
-                  'Accuracy: {:4.2f}, Loss: {:.6f}'
-                  .format(epoch, i, cfg.TRAIN.epoch_iters,
-                          batch_time.average(), data_time.average(),
-                          cfg.TRAIN.running_lr_encoder, cfg.TRAIN.running_lr_decoder,
-                          ave_acc.average(), ave_total_loss.average()))
+            print(f'Epoch: [{epoch}][{i}/{cfg.TRAIN.epoch_iters}], Time: {batch_time.average():.2f}, Data: {data_time.average():.2f}, '
+                  f'lr_encoder: {cfg.TRAIN.running_lr_encoder:.6f}, lr_decoder: {cfg.TRAIN.running_lr_decoder:.6f}, '
+                  f'Accuracy: {ave_acc.average():4.2f}, Loss: {ave_total_loss.average():.6f}'
+            )
 
             fractional_epoch = epoch - 1 + 1. * i / cfg.TRAIN.epoch_iters
             history['train']['epoch'].append(fractional_epoch)
@@ -194,7 +186,7 @@ def main(cfg, gpus):
             device_ids=gpus)
         # For sync bn
         patch_replication_callback(segmentation_module)
-    segmentation_module.to('cuda')
+    segmentation_module.cuda()
 
     # Set up optimizers
     nets = (net_encoder, net_decoder, crit)
