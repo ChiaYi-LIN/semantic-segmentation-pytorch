@@ -5,8 +5,8 @@ DATASET:
   num_class: 150
   imgSizes: (300, 375, 450, 525, 600)
   imgMaxSize: 1000
-  padding_constant: 2
-  segm_downsampling_rate: 1
+  padding_constant: 32
+  segm_downsampling_rate: 32
   random_flip: True
 
 MODEL:
@@ -15,7 +15,7 @@ MODEL:
   fc_dim: 512
 
 TRAIN:
-  batch_size_per_gpu: 1
+  batch_size_per_gpu: 2
   num_epoch: 20
   start_epoch: 0
   epoch_iters: 5000
