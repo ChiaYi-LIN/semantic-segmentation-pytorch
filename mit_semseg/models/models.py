@@ -35,7 +35,7 @@ class SegmentationModule(SegmentationModuleBase):
             if self.deep_sup_scale is not None: # use deep supervision technique
                 (pred, pred_deepsup) = self.decoder(encode_feats)
             else:
-                pred = self.decoder(encode_feats, segSize=(seg_label.shape[1], seg_label.shape[2]))
+                pred = self.decoder(encode_feats)
             
             if self.deep_sup_scale is not None:
                 loss = self.crit(pred, seg_label) + self.deep_sup_scale * self.crit(pred_deepsup, seg_label)
