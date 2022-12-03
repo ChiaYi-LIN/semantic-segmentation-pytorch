@@ -8,16 +8,17 @@ from packaging.version import Version
 # Numerical libs
 import torch
 import torch.nn as nn
+import torchvision
 # Our libs
 from mit_semseg.config import cfg
 from mit_semseg.dataset import TrainDataset
 from mit_semseg.models import ModelBuilder, SegmentationModule
 from mit_semseg.utils import AverageMeter, parse_devices, setup_logger
 from mit_semseg.lib.nn import UserScatteredDataParallel, user_scattered_collate, patch_replication_callback
-
+from mit_semseg.models.swintransformer import SAShiftedWindowAttention
 
 # train one epoch
-def train(segmentation_module, iterator, optimizers, history, epoch, cfg):
+def train(segmentation_module, iterator, optimizers, history, epoch, cfg, logger):
     batch_time = AverageMeter()
     data_time = AverageMeter()
     ave_total_loss = AverageMeter()
@@ -57,7 +58,7 @@ def train(segmentation_module, iterator, optimizers, history, epoch, cfg):
 
         # calculate accuracy, and display
         if i % cfg.TRAIN.disp_iter == 0:
-            print(f'Epoch: [{epoch}][{i}/{cfg.TRAIN.epoch_iters}], Time: {batch_time.average():.2f}, Data: {data_time.average():.2f}, '
+            logger.info(f'Epoch: [{epoch}][{i}/{cfg.TRAIN.epoch_iters}], Time: {batch_time.average():.2f}, Data: {data_time.average():.2f}, '
                   f'lr_encoder: {cfg.TRAIN.running_lr_encoder:.6f}, lr_decoder: {cfg.TRAIN.running_lr_decoder:.6f}, '
                   f'Accuracy: {ave_acc.average():4.2f}, Loss: {ave_total_loss.average():.6f}'
             )
@@ -68,8 +69,8 @@ def train(segmentation_module, iterator, optimizers, history, epoch, cfg):
             history['train']['acc'].append(acc.data.item())
 
 
-def checkpoint(nets, history, cfg, epoch):
-    print('Saving checkpoints...')
+def checkpoint(nets, history, cfg, epoch, logger):
+    logger.info('Saving checkpoints...')
     (net_encoder, net_decoder, crit) = nets
 
     dict_encoder = net_encoder.state_dict()
@@ -103,6 +104,15 @@ def group_weight(module):
                 group_no_decay.append(m.weight)
             if m.bias is not None:
                 group_no_decay.append(m.bias)
+        elif isinstance(m, nn.LayerNorm):
+            if m.weight is not None:
+                group_no_decay.append(m.weight)
+            if m.bias is not None:
+                group_no_decay.append(m.bias)
+        elif isinstance(m, torchvision.models.swin_transformer.ShiftedWindowAttention):
+            group_no_decay.append(m.relative_position_bias_table)
+        elif isinstance(m, SAShiftedWindowAttention):
+            group_no_decay.append(m.relative_position_bias_table)
 
     assert len(list(module.parameters())) == len(group_decay) + len(group_no_decay)
     groups = [dict(params=group_decay), dict(params=group_no_decay, weight_decay=.0)]
@@ -111,16 +121,28 @@ def group_weight(module):
 
 def create_optimizers(nets, cfg):
     (net_encoder, net_decoder, crit) = nets
-    optimizer_encoder = torch.optim.SGD(
-        group_weight(net_encoder),
-        lr=cfg.TRAIN.lr_encoder,
-        momentum=cfg.TRAIN.beta1,
-        weight_decay=cfg.TRAIN.weight_decay)
-    optimizer_decoder = torch.optim.SGD(
-        group_weight(net_decoder),
-        lr=cfg.TRAIN.lr_decoder,
-        momentum=cfg.TRAIN.beta1,
-        weight_decay=cfg.TRAIN.weight_decay)
+    if cfg.TRAIN.optim == "SGD":
+        optimizer_encoder = torch.optim.SGD(
+            group_weight(net_encoder),
+            lr=cfg.TRAIN.lr_encoder,
+            momentum=cfg.TRAIN.momentum,
+            weight_decay=cfg.TRAIN.weight_decay)
+        optimizer_decoder = torch.optim.SGD(
+            group_weight(net_decoder),
+            lr=cfg.TRAIN.lr_decoder,
+            momentum=cfg.TRAIN.momentum,
+            weight_decay=cfg.TRAIN.weight_decay)
+    elif cfg.TRAIN.optim == "AdamW":
+        optimizer_encoder = torch.optim.AdamW(
+            group_weight(net_encoder),
+            lr=cfg.TRAIN.lr_encoder,
+            weight_decay=cfg.TRAIN.weight_decay)
+        optimizer_decoder = torch.optim.AdamW(
+            group_weight(net_decoder),
+            lr=cfg.TRAIN.lr_decoder,
+            weight_decay=cfg.TRAIN.weight_decay)
+    else:
+        raise Exception('Unknown optimizer!')
     return (optimizer_encoder, optimizer_decoder)
 
 
@@ -136,7 +158,7 @@ def adjust_learning_rate(optimizers, cur_iter, cfg):
         param_group['lr'] = cfg.TRAIN.running_lr_decoder
 
 
-def main(cfg, gpus):
+def main(cfg, gpus, logger):
     # Network Builders
     net_encoder = ModelBuilder.build_encoder(
         arch=cfg.MODEL.arch_encoder.lower(),
@@ -147,8 +169,8 @@ def main(cfg, gpus):
         fc_dim=cfg.MODEL.fc_dim,
         num_class=cfg.DATASET.num_class,
         weights=cfg.MODEL.weights_decoder)
-    # logger.info(f"Encoder arch:\n{net_encoder}")  
-    # logger.info(f"Decoder arch:\n{net_decoder}")
+    logger.info(f"Encoder arch:\n{net_encoder}")  
+    logger.info(f"Decoder arch:\n{net_decoder}")
 
     crit = nn.NLLLoss(ignore_index=-1)
 
@@ -174,7 +196,7 @@ def main(cfg, gpus):
         num_workers=cfg.TRAIN.workers,
         drop_last=True,
         pin_memory=True)
-    print('1 Epoch = {} iters'.format(cfg.TRAIN.epoch_iters))
+    logger.info('1 Epoch = {} iters'.format(cfg.TRAIN.epoch_iters))
 
     # create loader iterator
     iterator_train = iter(loader_train)
@@ -196,12 +218,12 @@ def main(cfg, gpus):
     history = {'train': {'epoch': [], 'loss': [], 'acc': []}}
 
     for epoch in range(cfg.TRAIN.start_epoch, cfg.TRAIN.num_epoch):
-        train(segmentation_module, iterator_train, optimizers, history, epoch+1, cfg)
+        train(segmentation_module, iterator_train, optimizers, history, epoch+1, cfg, logger)
 
         # checkpointing
-        checkpoint(nets, history, cfg, epoch+1)
+        checkpoint(nets, history, cfg, epoch+1, logger)
 
-    print('Training Done!')
+    logger.info('Training Done!')
 
 
 if __name__ == '__main__':
@@ -234,14 +256,15 @@ if __name__ == '__main__':
     cfg.merge_from_file(args.cfg)
     cfg.merge_from_list(args.opts)
     # cfg.freeze()
-
-    logger = setup_logger(distributed_rank=0)   # TODO
-    logger.info("Loaded configuration file {}".format(args.cfg))
-    logger.info("Running with config:\n{}".format(cfg))
+    
+    
 
     # Output directory
     if not os.path.isdir(cfg.DIR):
         os.makedirs(cfg.DIR)
+    logger = setup_logger(distributed_rank=0, filename=os.path.join(cfg.DIR, 'train.log'))   # TODO
+    logger.info("Loaded configuration file {}".format(args.cfg))
+    logger.info("Running with config:\n{}".format(cfg))
     logger.info("Outputing checkpoints to: {}".format(cfg.DIR))
     with open(os.path.join(cfg.DIR, 'config.yaml'), 'w') as f:
         f.write("{}".format(cfg))
@@ -270,4 +293,4 @@ if __name__ == '__main__':
     random.seed(cfg.TRAIN.seed)
     torch.manual_seed(cfg.TRAIN.seed)
 
-    main(cfg, gpus)
+    main(cfg, gpus, logger)
