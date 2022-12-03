@@ -38,7 +38,7 @@ def visualize_result(data, pred, dir_result):
     Image.fromarray(im_vis).save(os.path.join(dir_result, img_name.replace('.jpg', '.png')))
 
 
-def evaluate(segmentation_module, loader, cfg, gpu):
+def evaluate(segmentation_module, loader, cfg, gpu, logger):
     acc_meter = AverageMeter()
     intersection_meter = AverageMeter()
     union_meter = AverageMeter()
@@ -57,6 +57,10 @@ def evaluate(segmentation_module, loader, cfg, gpu):
         tic = time.perf_counter()
         with torch.no_grad():
             segSize = (seg_label.shape[0], seg_label.shape[1])
+            if segSize[0] > 900 or segSize[1] > 900:
+                pbar.update(1)
+                continue
+
             scores = torch.zeros(1, cfg.DATASET.num_class, segSize[0], segSize[1])
             scores = async_copy_to(scores, gpu)
 
@@ -97,14 +101,14 @@ def evaluate(segmentation_module, loader, cfg, gpu):
     # summary
     iou = intersection_meter.sum / (union_meter.sum + 1e-10)
     for i, _iou in enumerate(iou):
-        print('class [{}], IoU: {:.4f}'.format(i, _iou))
+        logger.info('class [{}], IoU: {:.4f}'.format(i, _iou))
 
-    print('[Eval Summary]:')
-    print('Mean IoU: {:.4f}, Accuracy: {:.2f}%, Inference Time: {:.4f}s'
+    logger.info('[Eval Summary]:')
+    logger.info('Mean IoU: {:.4f}, Accuracy: {:.2f}%, Inference Time: {:.4f}s'
           .format(iou.mean(), acc_meter.average()*100, time_meter.average()))
 
 
-def main(cfg, gpu):
+def main(cfg, gpu, logger):
     torch.cuda.set_device(gpu)
 
     # Network Builders
@@ -139,9 +143,9 @@ def main(cfg, gpu):
     segmentation_module.cuda()
 
     # Main loop
-    evaluate(segmentation_module, loader_val, cfg, gpu)
+    evaluate(segmentation_module, loader_val, cfg, gpu, logger)
 
-    print('Evaluation Done!')
+    logger.info('Evaluation Done!')
 
 
 if __name__ == '__main__':
@@ -175,7 +179,7 @@ if __name__ == '__main__':
     cfg.merge_from_list(args.opts)
     # cfg.freeze()
 
-    logger = setup_logger(distributed_rank=0)   # TODO
+    logger = setup_logger(distributed_rank=0, filename=os.path.join(cfg.DIR, 'eval.log'))   # TODO
     logger.info("Loaded configuration file {}".format(args.cfg))
     logger.info("Running with config:\n{}".format(cfg))
 
@@ -190,4 +194,4 @@ if __name__ == '__main__':
     if not os.path.isdir(os.path.join(cfg.DIR, "result")):
         os.makedirs(os.path.join(cfg.DIR, "result"))
 
-    main(cfg, args.gpu)
+    main(cfg, args.gpu, logger)
