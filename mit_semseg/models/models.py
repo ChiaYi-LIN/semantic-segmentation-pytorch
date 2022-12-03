@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from . import resnet, resnext, mobilenet, hrnet
+from . import resnet, resnext, mobilenet, hrnet, swintransformer
 from mit_semseg.lib.nn import SynchronizedBatchNorm2d
 BatchNorm2d = SynchronizedBatchNorm2d
 
@@ -47,7 +47,7 @@ class SegmentationModule(SegmentationModuleBase):
         # inference
         else:
             img_data = feed_dict['img_data']
-            encode_feats = self.encoder(feed_dict['img_data'], return_feature_maps=True)
+            encode_feats = self.encoder(img_data, return_feature_maps=True)
             pred = self.decoder(encode_feats, segSize=segSize)
             return pred
 
@@ -103,6 +103,9 @@ class ModelBuilder:
             net_encoder = Resnet(orig_resnext) # we can still use class Resnet
         elif arch == 'hrnetv2':
             net_encoder = hrnet.__dict__['hrnetv2'](pretrained=pretrained)
+        elif arch == 'swin_t':
+            orig_swin = swintransformer.__dict__['swin_t'](pretrained=pretrained)
+            net_encoder = SwinTransformer(orig_swin)
         else:
             raise Exception('Architecture undefined!')
 
@@ -151,6 +154,10 @@ class ModelBuilder:
                 fc_dim=fc_dim,
                 use_softmax=use_softmax,
                 fpn_dim=512)
+        elif arch == 'swin_t':
+            net_decoder = swintransformer.SwinTransformerDecoder(
+                num_class=num_class,
+                use_softmax=use_softmax)
         else:
             raise Exception('Architecture undefined!')
 
@@ -326,6 +333,38 @@ class MobileNetV2Dilated(nn.Module):
 
         else:
             return [self.features(x)]
+
+        
+class SwinTransformer(nn.Module):
+    def __init__(self, orig_swin):
+        super(SwinTransformer, self).__init__()
+
+        # take pretrained swin transformer, except AvgPool and FC
+        # stage 1
+        self.embed = orig_swin.features[0]
+        self.layer1 = orig_swin.features[1]
+        # stage 2
+        self.merge1 = orig_swin.features[2]
+        self.layer2 = orig_swin.features[3]
+        # stage 3
+        self.merge2 = orig_swin.features[4]
+        self.layer3 = orig_swin.features[5]
+        # stage 4
+        self.merge3 = orig_swin.features[6]
+        self.layer4 = orig_swin.features[7]
+        self.norm = orig_swin.norm
+
+    def forward(self, x, return_feature_maps=False):
+        feat_out = []
+
+        x = self.layer1(self.embed(x)); feat_out.append(x.permute(0, 3, 1, 2));
+        x = self.layer2(self.merge1(x)); feat_out.append(x.permute(0, 3, 1, 2));
+        x = self.layer3(self.merge2(x)); feat_out.append(x.permute(0, 3, 1, 2));
+        x = self.norm(self.layer4(self.merge3(x))); feat_out.append(x.permute(0, 3, 1, 2));
+
+        if return_feature_maps:
+            return feat_out
+        return [x.permute(0, 3, 1, 2)]        
 
 
 # last conv, deep supervision
@@ -508,7 +547,7 @@ class PPMDeepsup(nn.Module):
 class UPerNet(nn.Module):
     def __init__(self, num_class=150, fc_dim=4096,
                  use_softmax=False, pool_scales=(1, 2, 3, 6),
-                 fpn_inplanes=(256, 512, 1024, 2048), fpn_dim=256):
+                 fpn_dim=256):
         super(UPerNet, self).__init__()
         self.use_softmax = use_softmax
 
@@ -529,6 +568,7 @@ class UPerNet(nn.Module):
 
         # FPN Module
         self.fpn_in = []
+        fpn_inplanes=(fc_dim // 8, fc_dim // 4, fc_dim // 2, fc_dim)
         for fpn_inplane in fpn_inplanes[:-1]:   # skip the top layer
             self.fpn_in.append(nn.Sequential(
                 nn.Conv2d(fpn_inplane, fpn_dim, kernel_size=1, bias=False),
