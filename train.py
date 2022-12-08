@@ -11,7 +11,7 @@ import torch.nn as nn
 import torchvision
 # Our libs
 from mit_semseg.config import cfg
-from mit_semseg.dataset import TrainDataset
+from mit_semseg.dataset import TrainDataset, TrainDatasetSquareCrop
 from mit_semseg.models import ModelBuilder, SegmentationModule
 from mit_semseg.utils import AverageMeter, parse_devices, setup_logger
 from mit_semseg.lib.nn import UserScatteredDataParallel, user_scattered_collate, patch_replication_callback
@@ -176,17 +176,24 @@ def main(cfg, gpus, logger):
 
     if cfg.MODEL.arch_decoder.endswith('deepsup'):
         segmentation_module = SegmentationModule(
-            net_encoder, net_decoder, crit, cfg.TRAIN.deep_sup_scale)
+            net_encoder, net_decoder, crit, deep_sup_scale=cfg.TRAIN.deep_sup_scale, sr=cfg.TRAIN.sr)
     else:
         segmentation_module = SegmentationModule(
-            net_encoder, net_decoder, crit)
+            net_encoder, net_decoder, crit, sr=cfg.TRAIN.sr)
 
     # Dataset and Loader
-    dataset_train = TrainDataset(
-        cfg.DATASET.root_dataset,
-        cfg.DATASET.list_train,
-        cfg.DATASET,
-        batch_per_gpu=cfg.TRAIN.batch_size_per_gpu)
+    if not cfg.DATASET.square_crop:
+        dataset_train = TrainDataset(
+            cfg.DATASET.root_dataset,
+            cfg.DATASET.list_train,
+            cfg.DATASET,
+            batch_per_gpu=cfg.TRAIN.batch_size_per_gpu)
+    else:
+        dataset_train = TrainDatasetSquareCrop(
+            cfg.DATASET.root_dataset,
+            cfg.DATASET.list_train,
+            cfg.DATASET,
+            batch_per_gpu=cfg.TRAIN.batch_size_per_gpu)
 
     loader_train = torch.utils.data.DataLoader(
         dataset_train,
