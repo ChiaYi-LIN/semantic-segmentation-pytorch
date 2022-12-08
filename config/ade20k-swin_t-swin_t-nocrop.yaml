@@ -8,7 +8,6 @@ DATASET:
   padding_constant: 32
   segm_downsampling_rate: 4
   random_flip: True
-  square_crop: True
 
 MODEL:
   arch_encoder: "swin_t"
@@ -38,4 +37,4 @@ TEST:
   checkpoint: "epoch_32.pth"
   result: "./"
 
-DIR: "ckpt/ade20k-swin_t-swin_t-32epoch"
+DIR: "ckpt/ade20k-swin_t-swin_t-nocrop-32epoch"

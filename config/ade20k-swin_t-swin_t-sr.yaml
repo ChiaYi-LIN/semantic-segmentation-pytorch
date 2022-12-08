@@ -29,6 +29,7 @@ TRAIN:
   workers: 16
   disp_iter: 20
   seed: 304
+  sr: True
 
 VAL:
   visualize: False
@@ -38,4 +39,4 @@ TEST:
   checkpoint: "epoch_32.pth"
   result: "./"
 
-DIR: "ckpt/ade20k-swin_t-swin_t-32epoch"
+DIR: "ckpt/ade20k-swin_t-swin_t-sr-32epoch"
