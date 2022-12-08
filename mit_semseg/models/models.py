@@ -19,17 +19,21 @@ class SegmentationModuleBase(nn.Module):
 
 
 class SegmentationModule(SegmentationModuleBase):
-    def __init__(self, net_enc, net_dec, crit, deep_sup_scale=None):
+    def __init__(self, net_enc, net_dec, crit, deep_sup_scale=None, sr=False):
         super(SegmentationModule, self).__init__()
         self.encoder = net_enc
         self.decoder = net_dec
         self.crit = crit
         self.deep_sup_scale = deep_sup_scale
+        self.sr = sr
 
     def forward(self, feed_dict, *, segSize=None):
         # training
+        img_data = feed_dict['img_data']
+        if self.sr:
+            img_data = nn.functional.interpolate(img_data, size=(img_data.shape[2] // 2, img_data.shape[3] // 2), mode='bicubic', align_corners=False)
+        
         if segSize is None:
-            img_data = feed_dict['img_data']
             seg_label = feed_dict['seg_label']
             encode_feats = self.encoder(img_data, return_feature_maps=True)
             if self.deep_sup_scale is not None: # use deep supervision technique
@@ -40,13 +44,14 @@ class SegmentationModule(SegmentationModuleBase):
             if self.deep_sup_scale is not None:
                 loss = self.crit(pred, seg_label) + self.deep_sup_scale * self.crit(pred_deepsup, seg_label)
             else:
+                if pred.shape[2] != seg_label.shape[1] or pred.shape[3] != seg_label.shape[2]:
+                    pred = nn.functional.interpolate(pred, size=(seg_label.shape[1], seg_label.shape[2]), mode='bilinear', align_corners=False)
                 loss = self.crit(pred, seg_label)
 
             acc = self.pixel_acc(pred, seg_label)
             return loss, acc
         # inference
         else:
-            img_data = feed_dict['img_data']
             encode_feats = self.encoder(img_data, return_feature_maps=True)
             pred = self.decoder(encode_feats, segSize=segSize)
             return pred
