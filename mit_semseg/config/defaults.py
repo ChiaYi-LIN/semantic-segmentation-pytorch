@@ -25,6 +25,8 @@ _C.DATASET.padding_constant = 8
 _C.DATASET.segm_downsampling_rate = 8
 # randomly horizontally flip images when train/test
 _C.DATASET.random_flip = True
+# crop image and mask to square shape
+_C.DATASET.square_crop = False
 
 # -----------------------------------------------------------------------------
 # Model
@@ -73,6 +75,8 @@ _C.TRAIN.workers = 16
 _C.TRAIN.disp_iter = 20
 # manual seed
 _C.TRAIN.seed = 304
+# use half-sized image as input
+_C.TRAIN.sr = False
 
 # -----------------------------------------------------------------------------
 # Validation
