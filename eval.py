@@ -125,7 +125,7 @@ def main(cfg, gpu, logger):
 
     crit = nn.NLLLoss(ignore_index=-1)
 
-    segmentation_module = SegmentationModule(net_encoder, net_decoder, crit)
+    segmentation_module = SegmentationModule(net_encoder, net_decoder, crit, sr=cfg.TRAIN.sr)
 
     # Dataset and Loader
     dataset_val = ValDataset(
