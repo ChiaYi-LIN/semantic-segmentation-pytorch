@@ -66,6 +66,15 @@ def conv3x3_bn_relu(in_planes, out_planes, stride=1):
         nn.ReLU(inplace=True),
     )
 
+def transconv3x3_bn_relu(in_planes, out_planes, stride=2):
+    "3x3 transpose convolution + BN + relu"
+    return nn.Sequential(
+        nn.ConvTranspose2d(in_planes, out_planes, kernel_size=3,
+            stride=stride, padding=1, output_padding=1, bias=False),
+        BatchNorm2d(out_planes),
+        nn.ReLU(inplace=True),
+    )
+
 
 class SwinTransformerDecoder(nn.Module):
     """
@@ -100,7 +109,7 @@ class SwinTransformerDecoder(nn.Module):
         stochastic_depth_prob: float = 0.0,
         norm_layer: Optional[Callable[..., nn.Module]] = None,
         block: Optional[Callable[..., nn.Module]] = None,
-        sr: bool = False,
+        fpn_dim: int = 256,
     ):
         super(SwinTransformerDecoder, self).__init__()
         self.use_softmax = use_softmax
@@ -140,42 +149,45 @@ class SwinTransformerDecoder(nn.Module):
             layers.append(nn.Sequential(*stage))
             # add patch splitting layer
             if i_stage < (len(depths) - 1):
-                layers.append(PatchSpliting(dim, norm_layer))
-                layers.append(nn.Linear(dim, dim // 2))
+                layers.append(TransformerUpsample(dim, norm_layer))
 
         self.body = nn.Sequential(*layers)
-        self.norm = norm_layer(embed_dim)
-
-        if sr:
-            self.head = nn.Sequential(
-                nn.ConvTranspose2d(
-                    embed_dim, num_class, kernel_size=(patch_size[0]*2, patch_size[1]*2), stride=(patch_size[0]*2, patch_size[1]*2)
-                ),
-            )
-        else:
-            # self.head = nn.Sequential(
-            #     nn.ConvTranspose2d(
-            #         embed_dim, num_class, kernel_size=(patch_size[0], patch_size[1]), stride=(patch_size[0], patch_size[1])
-            #     ),
-            # )
-            self.conv_last = nn.Sequential(
-                conv3x3_bn_relu(embed_dim, embed_dim, 1),
-                nn.Conv2d(embed_dim, num_class, kernel_size=1)
-            )
-
+        self.norm4 = norm_layer(8 * embed_dim)
+        self.norm3 = norm_layer(4 * embed_dim)
+        self.norm2 = norm_layer(2 * embed_dim)
+        self.norm1 = norm_layer(embed_dim)
+        self.last = nn.Sequential(
+                nn.Linear(sum(stage_dims), fpn_dim),
+                norm_layer(fpn_dim),
+                nn.ReLU(inplace=True),
+                nn.Linear(fpn_dim, num_class),
+        )
     def forward(self, feat_out, segSize=None):
         assert(len(feat_out) == 4)
         encode1, encode2, encode3, encode4 = feat_out
         encode1, encode2, encode3, encode4 = encode1.permute(0, 2, 3, 1), encode2.permute(0, 2, 3, 1), encode3.permute(0, 2, 3, 1), encode4.permute(0, 2, 3, 1)
         
-        decode4 = self.body[0](encode4)    
-        decode3 = self.body[2:4](torch.cat([self.body[1](decode4), encode3], dim=-1))
-        decode2 = self.body[5:7](torch.cat([self.body[4](decode3), encode2], dim=-1))
-        decode1 = self.body[8:10](torch.cat([self.body[7](decode2), encode1], dim=-1))
+        decode4 = self.body[0](encode4)   
+        decode3 = self.body[2](self.body[1](decode4) + encode3)
+        decode2 = self.body[4](self.body[3](decode3) + encode2)
+        decode1 = self.body[6](self.body[5](decode2) + encode1)
+        
+        decode4 = self.norm4(decode4)
+        decode3 = self.norm3(decode3)
+        decode2 = self.norm2(decode2)
+        decode1 = self.norm1(decode1)
 
-        decode1 = self.norm(decode1)
-        decode1 = decode1.permute(0, 3, 1, 2)
-        x = self.conv_last(decode1)
+        fpn_feature_list = [decode1.permute(0, 3, 1, 2), decode2.permute(0, 3, 1, 2), decode3.permute(0, 3, 1, 2), decode4.permute(0, 3, 1, 2)]
+        output_size = fpn_feature_list[0].size()[2:]
+        fusion_list = [fpn_feature_list[0]]
+        for i in range(1, len(fpn_feature_list)):
+            fusion_list.append(nn.functional.interpolate(
+                fpn_feature_list[i],
+                output_size,
+                mode='bilinear', align_corners=False))
+        fusion_out = torch.cat(fusion_list, 1)
+        
+        x = self.last(fusion_out.permute(0, 2, 3, 1)).permute(0, 3, 1, 2)
 
         if self.use_softmax:  # is True during inference
             x = nn.functional.interpolate(
@@ -186,7 +198,34 @@ class SwinTransformerDecoder(nn.Module):
         x = nn.functional.log_softmax(x, dim=1)
 
         return x
-    
+
+class TransformerUpsample(nn.Module):
+    """Bilinear Upsample Layer for Transformer.
+    Args:
+        dim (int): Number of input channels.
+        norm_layer (nn.Module): Normalization layer. Default: nn.LayerNorm.
+    """
+
+    def __init__(self, dim: int, norm_layer: Callable[..., nn.Module] = nn.LayerNorm):
+        super().__init__()
+        self.dim = dim
+        self.reduction = nn.Linear(dim, dim // 2, bias=False)
+        self.norm = norm_layer(dim)
+
+    def forward(self, x: Tensor):
+        """
+        Args:
+            x (Tensor): input tensor with expected layout of [N, H, W, C]
+        Returns:
+            Tensor with layout of [N, 2*H, 2*W, C/2]
+        """
+        x = x.permute(0, 3, 1, 2)
+        N, C, H, W = x.shape
+
+        x = nn.functional.interpolate(x, size=(H * 2, W * 2), mode='bilinear', align_corners=False)
+        x = self.norm(x.permute(0, 2, 3, 1))
+        x = self.reduction(x)  # N 2*H 2*W C/2
+        return x
 
 class PatchSpliting(nn.Module):
     """Patch Spliting Layer.
@@ -378,8 +417,6 @@ class SAShiftedWindowAttention(nn.Module):
 
         nn.init.trunc_normal_(self.relative_position_bias_table, std=0.02)
 
-        # shared attention
-        self.shared_attn = None
 
     def forward(self, x: Tensor):
         """
@@ -394,7 +431,7 @@ class SAShiftedWindowAttention(nn.Module):
         relative_position_bias = relative_position_bias.view(N, N, -1)
         relative_position_bias = relative_position_bias.permute(2, 0, 1).contiguous().unsqueeze(0)
 
-        x, shared_attn = sa_shifted_window_attention(
+        x, attn_score = sa_shifted_window_attention(
             x,
             self.qkv.weight,
             self.proj.weight,
@@ -406,11 +443,9 @@ class SAShiftedWindowAttention(nn.Module):
             dropout=self.dropout,
             qkv_bias=self.qkv.bias,
             proj_bias=self.proj.bias,
-            shared_attn=self.shared_attn
+            shared_attn=None
         )
 
-        if self.shared_attn is None:
-            self.shared_attn = shared_attn
 
         return x
     
