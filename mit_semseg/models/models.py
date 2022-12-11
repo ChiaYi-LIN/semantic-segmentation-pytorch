@@ -19,40 +19,53 @@ class SegmentationModuleBase(nn.Module):
 
 
 class SegmentationModule(SegmentationModuleBase):
-    def __init__(self, net_enc, net_dec, crit, deep_sup_scale=None, sr=False):
+    def __init__(self, net_enc, net_dec, crit, deep_sup_scale=None, options=None):
         super(SegmentationModule, self).__init__()
         self.encoder = net_enc
         self.decoder = net_dec
         self.crit = crit
         self.deep_sup_scale = deep_sup_scale
-        self.sr = sr
+        self.sr = options["sr"]
+        self.decoder_sisr = options["decoder_sisr"]
+        self.crit_sisr = options["crit_sisr"]
 
     def forward(self, feed_dict, *, segSize=None):
         # training
         img_data = feed_dict['img_data']
         if self.sr:
-            img_data = nn.functional.interpolate(img_data, size=(img_data.shape[2] // 2, img_data.shape[3] // 2), mode='bicubic', align_corners=False)
-        
+            input_img = nn.functional.interpolate(img_data, size=(img_data.shape[2] // 2, img_data.shape[3] // 2), mode='bicubic', align_corners=False)
+        else:
+            input_img = img_data
+
         if segSize is None:
+            # Shared Encoder
+            encode_feats = self.encoder(input_img, return_feature_maps=True)
+
+            # SSSR Path
             seg_label = feed_dict['seg_label']
-            encode_feats = self.encoder(img_data, return_feature_maps=True)
             if self.deep_sup_scale is not None: # use deep supervision technique
                 (pred, pred_deepsup) = self.decoder(encode_feats)
             else:
-                pred = self.decoder(encode_feats)
+                pred = self.decoder(encode_feats, segSize=(seg_label.shape[1], seg_label.shape[2]))
             
             if self.deep_sup_scale is not None:
-                loss = self.crit(pred, seg_label) + self.deep_sup_scale * self.crit(pred_deepsup, seg_label)
+                loss_ss = self.crit(pred, seg_label) + self.deep_sup_scale * self.crit(pred_deepsup, seg_label)
             else:
-                if pred.shape[2] != seg_label.shape[1] or pred.shape[3] != seg_label.shape[2]:
-                    pred = nn.functional.interpolate(pred, size=(seg_label.shape[1], seg_label.shape[2]), mode='bilinear', align_corners=False)
-                loss = self.crit(pred, seg_label)
+                loss_ss = self.crit(pred, seg_label)
 
+            loss = loss_ss
             acc = self.pixel_acc(pred, seg_label)
+
+            # SISR Path
+            if self.decoder_sisr is not None:
+                pred_sisr = self.decoder_sisr(encode_feats, segSize=(img_data.shape[2], img_data.shape[3]))
+                loss_sisr = self.crit_sisr(pred_sisr, img_data)
+                loss = 0.9 * loss_ss + 0.1 * loss_sisr
+
             return loss, acc
         # inference
         else:
-            encode_feats = self.encoder(img_data, return_feature_maps=True)
+            encode_feats = self.encoder(input_img, return_feature_maps=True)
             pred = self.decoder(encode_feats, segSize=segSize)
             return pred
 
@@ -161,6 +174,7 @@ class ModelBuilder:
                 fpn_dim=512)
         elif arch == 'swin_t':
             net_decoder = swintransformer.SwinTransformerDecoder(
+                head="SSSR",
                 num_class=num_class,
                 use_softmax=use_softmax)
         else:
@@ -172,6 +186,23 @@ class ModelBuilder:
             net_decoder.load_state_dict(
                 torch.load(weights, map_location=lambda storage, loc: storage), strict=False)
         return net_decoder
+    
+    
+    @staticmethod
+    def build_decoder_sisr(arch='swin_t', weights=''):
+        arch = arch.lower()
+        if arch == 'swin_t':
+            net_decoder_sisr = swintransformer.SwinTransformerDecoder(
+                head="SISR")
+        else:
+            raise Exception('Architecture undefined!')
+        
+        net_decoder_sisr.apply(ModelBuilder.weights_init)
+        if len(weights) > 0:
+            print('Loading weights for net_decoder_sisr')
+            net_decoder_sisr.load_state_dict(
+                torch.load(weights, map_location=lambda storage, loc: storage), strict=False)
+        return net_decoder_sisr
 
 
 def conv3x3_bn_relu(in_planes, out_planes, stride=1):
@@ -628,10 +659,10 @@ class UPerNet(nn.Module):
                 mode='bilinear', align_corners=False))
         fusion_out = torch.cat(fusion_list, 1)
         x = self.conv_last(fusion_out)
+        if x.shape[2] != segSize[0] or x.shape[3] != segSize[1]:
+            x = nn.functional.interpolate(x, size=segSize, mode='bilinear', align_corners=False)
 
         if self.use_softmax:  # is True during inference
-            x = nn.functional.interpolate(
-                x, size=segSize, mode='bilinear', align_corners=False)
             x = nn.functional.softmax(x, dim=1)
             return x
 

@@ -5,7 +5,7 @@ import torch
 from torch import Tensor
 import torch.nn as nn
 import torch.nn.functional as F
-from torchvision import models
+from torchvision import models, transforms
 
 from torchvision.models.swin_transformer import StochasticDepth, MLP
 from mit_semseg.lib.nn import SynchronizedBatchNorm2d
@@ -76,6 +76,13 @@ def transconv3x3_bn_relu(in_planes, out_planes, stride=2):
     )
 
 
+class CustomTransforms:
+    def __init__(self) -> None:
+        self.inverse_normalize_transform = transforms.Compose([
+            transforms.Normalize(mean=[0., 0., 0.], std = [1/0.229, 1/0.224, 1/0.225]),
+            transforms.Normalize(mean=[-0.485, -0.456, -0.406], std = [1., 1., 1.]),
+        ])
+
 class SwinTransformerDecoder(nn.Module):
     """
     Implements Swin Transformer Decoder Head.
@@ -96,6 +103,7 @@ class SwinTransformerDecoder(nn.Module):
 
     def __init__(
         self,
+        head: str,
         num_class: int = 150,
         use_softmax: bool = False,
         patch_size: List[int] = [4, 4],
@@ -156,21 +164,23 @@ class SwinTransformerDecoder(nn.Module):
         self.norm3 = norm_layer(4 * embed_dim)
         self.norm2 = norm_layer(2 * embed_dim)
         self.norm1 = norm_layer(embed_dim)
-        self.last = nn.Sequential(
-                nn.Linear(sum(stage_dims), fpn_dim),
-                norm_layer(fpn_dim),
-                nn.ReLU(inplace=True),
-                nn.Linear(fpn_dim, num_class),
-        )
+        
+        if head == "SSSR":
+            self.last = SwinTransformerDecoderSSSRHead(in_dim=sum(stage_dims), num_class=num_class, use_softmax=use_softmax, hidden_dim=fpn_dim, norm_layer=norm_layer)
+        elif head == "SISR":
+            self.last = SwinTransformerDecoderSISRHead(in_dim=sum(stage_dims), out_channel=3, hidden_dim=fpn_dim, norm_layer=norm_layer)
+        else:
+            raise Exception("Invalid decoder head")
+        
     def forward(self, feat_out, segSize=None):
         assert(len(feat_out) == 4)
         encode1, encode2, encode3, encode4 = feat_out
         encode1, encode2, encode3, encode4 = encode1.permute(0, 2, 3, 1), encode2.permute(0, 2, 3, 1), encode3.permute(0, 2, 3, 1), encode4.permute(0, 2, 3, 1)
         
         decode4 = self.body[0](encode4)   
-        decode3 = self.body[2](self.body[1](decode4) + encode3)
-        decode2 = self.body[4](self.body[3](decode3) + encode2)
-        decode1 = self.body[6](self.body[5](decode2) + encode1)
+        decode3 = self.body[2](self.body[1](decode4, target_size=(encode3.shape[1], encode3.shape[2])) + encode3)
+        decode2 = self.body[4](self.body[3](decode3, target_size=(encode2.shape[1], encode2.shape[2])) + encode2)
+        decode1 = self.body[6](self.body[5](decode2, target_size=(encode1.shape[1], encode1.shape[2])) + encode1)
         
         decode4 = self.norm4(decode4)
         decode3 = self.norm3(decode3)
@@ -185,19 +195,75 @@ class SwinTransformerDecoder(nn.Module):
                 fpn_feature_list[i],
                 output_size,
                 mode='bilinear', align_corners=False))
-        fusion_out = torch.cat(fusion_list, 1)
+        fusion_out = torch.cat(fusion_list, 1) # N C H W
         
-        x = self.last(fusion_out.permute(0, 2, 3, 1)).permute(0, 3, 1, 2)
+        x = self.last(fusion_out, segSize)
+
+        return x
+
+
+class SwinTransformerDecoderSSSRHead(nn.Module):
+    def __init__(self, in_dim, num_class, use_softmax, hidden_dim, norm_layer: Optional[Callable[..., nn.Module]] = None) -> None:
+        super().__init__()
+        self.use_softmax = use_softmax
+
+        if norm_layer is None:
+            norm_layer = partial(nn.LayerNorm, eps=1e-5)
+
+        self.layers = nn.Sequential(
+                nn.Linear(in_dim, hidden_dim),
+                norm_layer(hidden_dim),
+                nn.ReLU(inplace=True),
+                nn.Linear(hidden_dim, num_class),
+        )
+    
+    def forward(self, x, segSize=None):
+        """
+        input: N, C, H, W
+        output: N, C, H, W
+        """
+        x = self.layers(x.permute(0, 2, 3, 1)).permute(0, 3, 1, 2)
+        if x.shape[2] != segSize[0] or x.shape[3] != segSize[1]:
+            x = nn.functional.interpolate(x, size=segSize, mode='bilinear', align_corners=False)
 
         if self.use_softmax:  # is True during inference
-            x = nn.functional.interpolate(
-                x, size=segSize, mode='bilinear', align_corners=False)
             x = nn.functional.softmax(x, dim=1)
             return x
 
         x = nn.functional.log_softmax(x, dim=1)
 
         return x
+    
+
+class SwinTransformerDecoderSISRHead(nn.Module):
+    def __init__(self, in_dim, out_channel, hidden_dim, norm_layer: Optional[Callable[..., nn.Module]] = None) -> None:
+        super().__init__()
+        if norm_layer is None:
+            norm_layer = partial(nn.LayerNorm, eps=1e-5)
+        self.project = nn.Sequential(
+                nn.Linear(in_dim, hidden_dim),
+                norm_layer(hidden_dim),
+        )
+        self.layers = nn.Sequential(
+                nn.ReLU(inplace=True),
+                nn.Linear(hidden_dim, out_channel),
+        )
+        self.inverse_normalize_transform = CustomTransforms().inverse_normalize_transform
+    
+    def forward(self, x, segSize=None):
+        """
+        input: N, C, H, W
+        output: N, C, H, W
+        """
+        x = self.project(x.permute(0, 2, 3, 1)).permute(0, 3, 1, 2)
+        if x.shape[2] != segSize[0] or x.shape[3] != segSize[1]:
+            x = nn.functional.interpolate(x, size=segSize, mode='bilinear', align_corners=False)
+
+        x = self.layers(x.permute(0, 2, 3, 1)).permute(0, 3, 1, 2)
+        x = self.inverse_normalize_transform(x)
+
+        return x    
+
 
 class TransformerUpsample(nn.Module):
     """Bilinear Upsample Layer for Transformer.
@@ -212,17 +278,20 @@ class TransformerUpsample(nn.Module):
         self.reduction = nn.Linear(dim, dim // 2, bias=False)
         self.norm = norm_layer(dim)
 
-    def forward(self, x: Tensor):
+    def forward(self, x: Tensor, target_size: tuple = None):
         """
         Args:
             x (Tensor): input tensor with expected layout of [N, H, W, C]
+            target_size (tuple): target upsample size (if None then (2*H, 2*W))
         Returns:
             Tensor with layout of [N, 2*H, 2*W, C/2]
         """
         x = x.permute(0, 3, 1, 2)
         N, C, H, W = x.shape
-
-        x = nn.functional.interpolate(x, size=(H * 2, W * 2), mode='bilinear', align_corners=False)
+        if target_size is None:
+            x = nn.functional.interpolate(x, size=(H * 2, W * 2), mode='bilinear', align_corners=False)
+        else:
+            x = nn.functional.interpolate(x, size=target_size, mode='bilinear', align_corners=False)
         x = self.norm(x.permute(0, 2, 3, 1))
         x = self.reduction(x)  # N 2*H 2*W C/2
         return x
