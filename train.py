@@ -46,7 +46,8 @@ def train(segmentation_module, iterator, optimizers, history, epoch, cfg, logger
         # Backward
         loss.backward()
         for optimizer in optimizers:
-            optimizer.step()
+            if optimizer is not None:
+                optimizer.step()
 
         # measure elapsed time
         batch_time.update(time.time() - tic)
@@ -71,7 +72,7 @@ def train(segmentation_module, iterator, optimizers, history, epoch, cfg, logger
 
 def checkpoint(nets, history, cfg, epoch, logger):
     logger.info('Saving checkpoints...')
-    (net_encoder, net_decoder, crit) = nets
+    (net_encoder, net_decoder, net_decoder_sisr, crit, crit_sisr) = nets
 
     dict_encoder = net_encoder.state_dict()
     dict_decoder = net_decoder.state_dict()
@@ -120,7 +121,7 @@ def group_weight(module):
 
 
 def create_optimizers(nets, cfg):
-    (net_encoder, net_decoder, crit) = nets
+    (net_encoder, net_decoder, net_decoder_sisr, crit, crit_sisr) = nets
     if cfg.TRAIN.optim == "SGD":
         optimizer_encoder = torch.optim.SGD(
             group_weight(net_encoder),
@@ -132,6 +133,14 @@ def create_optimizers(nets, cfg):
             lr=cfg.TRAIN.lr_decoder,
             momentum=cfg.TRAIN.momentum,
             weight_decay=cfg.TRAIN.weight_decay)
+        if net_decoder_sisr is not None:
+            optimizer_decoder_sisr = torch.optim.SGD(
+                group_weight(net_decoder_sisr),
+                lr=cfg.TRAIN.lr_decoder,
+                momentum=cfg.TRAIN.momentum,
+                weight_decay=cfg.TRAIN.weight_decay)
+        else:
+            optimizer_decoder_sisr = None
     elif cfg.TRAIN.optim == "AdamW":
         optimizer_encoder = torch.optim.AdamW(
             group_weight(net_encoder),
@@ -141,9 +150,16 @@ def create_optimizers(nets, cfg):
             group_weight(net_decoder),
             lr=cfg.TRAIN.lr_decoder,
             weight_decay=cfg.TRAIN.weight_decay)
+        if net_decoder_sisr is not None:
+            optimizer_decoder_sisr = torch.optim.AdamW(
+                group_weight(net_decoder_sisr),
+                lr=cfg.TRAIN.lr_decoder,
+                weight_decay=cfg.TRAIN.weight_decay)
+        else:
+            optimizer_decoder_sisr = None
     else:
         raise Exception('Unknown optimizer!')
-    return (optimizer_encoder, optimizer_decoder)
+    return (optimizer_encoder, optimizer_decoder, optimizer_decoder_sisr)
 
 
 def adjust_learning_rate(optimizers, cur_iter, cfg):
@@ -151,11 +167,14 @@ def adjust_learning_rate(optimizers, cur_iter, cfg):
     cfg.TRAIN.running_lr_encoder = cfg.TRAIN.lr_encoder * scale_running_lr
     cfg.TRAIN.running_lr_decoder = cfg.TRAIN.lr_decoder * scale_running_lr
 
-    (optimizer_encoder, optimizer_decoder) = optimizers
+    (optimizer_encoder, optimizer_decoder, optimizer_decoder_sisr) = optimizers
     for param_group in optimizer_encoder.param_groups:
         param_group['lr'] = cfg.TRAIN.running_lr_encoder
     for param_group in optimizer_decoder.param_groups:
         param_group['lr'] = cfg.TRAIN.running_lr_decoder
+    if optimizer_decoder_sisr is not None:
+        for param_group in optimizer_decoder_sisr.param_groups:
+            param_group['lr'] = cfg.TRAIN.running_lr_decoder
 
 
 def main(cfg, gpus, logger):
@@ -169,17 +188,33 @@ def main(cfg, gpus, logger):
         fc_dim=cfg.MODEL.fc_dim,
         num_class=cfg.DATASET.num_class,
         weights=cfg.MODEL.weights_decoder)
+    if cfg.MODEL.arch_decoder_sisr != "":
+        net_decoder_sisr = ModelBuilder.build_decoder_sisr(
+            arch=cfg.MODEL.arch_decoder_sisr.lower(),
+            weights=cfg.MODEL.weights_decoder_sisr)
+    else:
+        net_decoder_sisr = None
     logger.info(f"Encoder arch:\n{net_encoder}")  
     logger.info(f"Decoder arch:\n{net_decoder}")
+    logger.info(f"Decoder_sisr arch:\n{net_decoder_sisr}")
 
     crit = nn.NLLLoss(ignore_index=-1)
+    if cfg.MODEL.arch_decoder_sisr != "":
+        crit_sisr = nn.MSELoss()
+    else:
+        crit_sisr = None
 
+    options = {
+        "sr": cfg.TRAIN.sr,
+        "decoder_sisr": net_decoder_sisr,
+        "crit_sisr": crit_sisr,
+    }
     if cfg.MODEL.arch_decoder.endswith('deepsup'):
         segmentation_module = SegmentationModule(
-            net_encoder, net_decoder, crit, deep_sup_scale=cfg.TRAIN.deep_sup_scale, sr=cfg.TRAIN.sr)
+            net_encoder, net_decoder, crit, deep_sup_scale=cfg.TRAIN.deep_sup_scale, options=options)
     else:
         segmentation_module = SegmentationModule(
-            net_encoder, net_decoder, crit, sr=cfg.TRAIN.sr)
+            net_encoder, net_decoder, crit, options=options)
 
     # Dataset and Loader
     if not cfg.DATASET.square_crop:
@@ -218,7 +253,7 @@ def main(cfg, gpus, logger):
     segmentation_module.cuda()
 
     # Set up optimizers
-    nets = (net_encoder, net_decoder, crit)
+    nets = (net_encoder, net_decoder, net_decoder_sisr, crit, crit_sisr)
     optimizers = create_optimizers(nets, cfg)
 
     # Main loop
