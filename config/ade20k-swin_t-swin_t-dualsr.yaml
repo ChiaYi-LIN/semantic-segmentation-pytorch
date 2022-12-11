@@ -1,0 +1,43 @@
+DATASET:
+  root_dataset: "./data/"
+  list_train: "./data/training.odgt"
+  list_val: "./data/validation.odgt"
+  num_class: 150
+  imgSizes: (300, 375, 450, 525, 600)
+  imgMaxSize: 1000
+  padding_constant: 32
+  segm_downsampling_rate: 4
+  random_flip: True
+  square_crop: True
+
+MODEL:
+  arch_encoder: "swin_t"
+  arch_decoder: "swin_t"
+  arch_decoder_sisr: "swin_t"
+  fc_dim: 768
+
+TRAIN:
+  batch_size_per_gpu: 2
+  num_epoch: 32
+  start_epoch: 0
+  epoch_iters: 5000
+  optim: "AdamW"
+  lr_encoder: 6e-5
+  lr_decoder: 6e-5
+  lr_pow: 0.9
+  weight_decay: 1e-2
+  fix_bn: False
+  workers: 16
+  disp_iter: 20
+  seed: 304
+  sr: True
+
+VAL:
+  visualize: False
+  checkpoint: "epoch_32.pth"
+
+TEST:
+  checkpoint: "epoch_32.pth"
+  result: "./"
+
+DIR: "ckpt/ade20k-swin_t-swin_t-dualsr-32epoch"
