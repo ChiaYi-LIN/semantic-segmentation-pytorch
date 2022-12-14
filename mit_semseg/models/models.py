@@ -28,16 +28,23 @@ class SegmentationModule(SegmentationModuleBase):
         self.sr = options["sr"]
         self.decoder_sisr = options["decoder_sisr"]
         self.crit_sisr = options["crit_sisr"]
+        self.crit_aa = options["crit_aa"]
 
     def forward(self, feed_dict, *, segSize=None):
-        # training
         img_data = feed_dict['img_data']
         if self.sr:
             input_img = nn.functional.interpolate(img_data, size=(img_data.shape[2] // 2, img_data.shape[3] // 2), mode='bicubic', align_corners=False)
         else:
             input_img = img_data
-
+        # training
         if segSize is None:
+            # Loss Tracker
+            loss_dict = {
+                "ss": None,
+                "sisr": None,
+                "aa": None,
+            }
+
             # Shared Encoder
             encode_feats = self.encoder(input_img, return_feature_maps=True)
 
@@ -52,6 +59,7 @@ class SegmentationModule(SegmentationModuleBase):
                 loss_ss = self.crit(pred, seg_label) + self.deep_sup_scale * self.crit(pred_deepsup, seg_label)
             else:
                 loss_ss = self.crit(pred, seg_label)
+            loss_dict["ss"] = loss_ss
 
             loss = loss_ss
             acc = self.pixel_acc(pred, seg_label)
@@ -60,9 +68,25 @@ class SegmentationModule(SegmentationModuleBase):
             if self.decoder_sisr is not None:
                 pred_sisr = self.decoder_sisr(encode_feats, segSize=(img_data.shape[2], img_data.shape[3]))
                 loss_sisr = self.crit_sisr(pred_sisr, img_data)
-                loss = 0.9 * loss_ss + 0.1 * loss_sisr
+                loss_dict["sisr"] = loss_sisr
 
-            return loss, acc
+                if self.crit_aa is not None:
+                    loss_aa = []
+                    stage_indices = [0, 2, 4, 6]
+                    block_indices = [0, 1]
+                    for stage_index in stage_indices:
+                        for block_index in block_indices:
+                            loss_aa.append(
+                                self.crit_aa(self.decoder.body[stage_index][block_index].attn.attn_score, self.decoder_sisr.body[stage_index][block_index].attn.attn_score).unsqueeze(0)
+                            )
+                    assert(len(loss_aa) == len(stage_indices) * len(block_indices))
+                    loss_aa = torch.mean(torch.cat(loss_aa, dim=0), dim=0)
+                    loss_dict["aa"] = loss_aa
+                    loss = loss_ss + loss_sisr + loss_aa
+                else:
+                    loss = loss_ss + loss_sisr
+
+            return loss, acc, loss_dict
         # inference
         else:
             encode_feats = self.encoder(input_img, return_feature_maps=True)
