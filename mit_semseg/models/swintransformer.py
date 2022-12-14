@@ -248,6 +248,12 @@ class SwinTransformerDecoderSISRHead(nn.Module):
                 nn.ReLU(inplace=True),
                 nn.Linear(hidden_dim, out_channel),
         )
+
+        # scale = 8
+        # self.upsample = nn.Sequential(
+        #     nn.Conv2d(hidden_dim, (scale ** 2) * out_channel, 3, 1, 1),
+        #     nn.PixelShuffle(scale)
+        # )
         self.inverse_normalize_transform = CustomTransforms().inverse_normalize_transform
     
     def forward(self, x, segSize=None):
@@ -256,6 +262,7 @@ class SwinTransformerDecoderSISRHead(nn.Module):
         output: N, C, H, W
         """
         x = self.project(x.permute(0, 2, 3, 1)).permute(0, 3, 1, 2)
+        # x = self.upsample(x)
         if x.shape[2] != segSize[0] or x.shape[3] != segSize[1]:
             x = nn.functional.interpolate(x, size=segSize, mode='bilinear', align_corners=False)
 
@@ -419,7 +426,7 @@ def sa_shifted_window_attention(
             attn = attn.view(-1, num_heads, x.size(1), x.size(1))
 
         attn = F.softmax(attn, dim=-1)
-        attn = F.dropout(attn, p=attention_dropout)
+        attn = F.dropout(attn, p=attention_dropout) # B*nW, nHead, Ws, Ws
 
     x = attn.matmul(v).transpose(1, 2).reshape(x.size(0), x.size(1), C)
     x = F.linear(x, proj_weight, proj_bias)
@@ -486,6 +493,7 @@ class SAShiftedWindowAttention(nn.Module):
 
         nn.init.trunc_normal_(self.relative_position_bias_table, std=0.02)
 
+        self.attn_score = None
 
     def forward(self, x: Tensor):
         """
@@ -514,7 +522,7 @@ class SAShiftedWindowAttention(nn.Module):
             proj_bias=self.proj.bias,
             shared_attn=None
         )
-
+        self.attn_score = attn_score
 
         return x
     
