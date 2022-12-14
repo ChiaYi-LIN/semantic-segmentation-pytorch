@@ -129,6 +129,7 @@ def main(cfg, gpu, logger):
         "sr": cfg.TRAIN.sr,
         "decoder_sisr": None,
         "crit_sisr": None,
+        "crit_aa": None,
     }
     segmentation_module = SegmentationModule(net_encoder, net_decoder, crit, options=options)
 

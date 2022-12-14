@@ -23,6 +23,9 @@ def train(segmentation_module, iterator, optimizers, history, epoch, cfg, logger
     data_time = AverageMeter()
     ave_total_loss = AverageMeter()
     ave_acc = AverageMeter()
+    ave_ss_loss = AverageMeter()
+    ave_sisr_loss = AverageMeter()
+    ave_aa_loss = AverageMeter()
 
     segmentation_module.train(not cfg.TRAIN.fix_bn)
 
@@ -39,7 +42,7 @@ def train(segmentation_module, iterator, optimizers, history, epoch, cfg, logger
         adjust_learning_rate(optimizers, cur_iter, cfg)
 
         # forward pass
-        loss, acc = segmentation_module(batch_data)
+        loss, acc, loss_dict = segmentation_module(batch_data)
         loss = loss.mean()
         acc = acc.mean()
 
@@ -56,12 +59,19 @@ def train(segmentation_module, iterator, optimizers, history, epoch, cfg, logger
         # update average loss and acc
         ave_total_loss.update(loss.data.item())
         ave_acc.update(acc.data.item()*100)
+        if loss_dict["ss"] is not None:
+            ave_ss_loss.update(loss_dict["ss"].mean().data.item())
+        if loss_dict["sisr"] is not None:
+            ave_sisr_loss.update(loss_dict["sisr"].mean().data.item())
+        if loss_dict["aa"] is not None:
+            ave_aa_loss.update(loss_dict["aa"].mean().data.item())
 
         # calculate accuracy, and display
         if i % cfg.TRAIN.disp_iter == 0:
             logger.info(f'Epoch: [{epoch}][{i}/{cfg.TRAIN.epoch_iters}], Time: {batch_time.average():.2f}, Data: {data_time.average():.2f}, '
                   f'lr_encoder: {cfg.TRAIN.running_lr_encoder:.6f}, lr_decoder: {cfg.TRAIN.running_lr_decoder:.6f}, '
-                  f'Accuracy: {ave_acc.average():4.2f}, Loss: {ave_total_loss.average():.6f}'
+                  f'Accuracy: {ave_acc.average():4.2f}, Loss: {ave_total_loss.average():.6f}, '
+                  f'Loss_ss: {ave_ss_loss.average():.6f}, Loss_sisr: {ave_sisr_loss.average():.6f}, Loss_aa: {ave_aa_loss.average():.6f}'
             )
 
             fractional_epoch = epoch - 1 + 1. * i / cfg.TRAIN.epoch_iters
@@ -203,11 +213,16 @@ def main(cfg, gpus, logger):
         crit_sisr = nn.MSELoss()
     else:
         crit_sisr = None
+    if cfg.TRAIN.use_aa_loss:
+        crit_aa = nn.L1Loss()
+    else:
+        crit_aa = None
 
     options = {
         "sr": cfg.TRAIN.sr,
         "decoder_sisr": net_decoder_sisr,
         "crit_sisr": crit_sisr,
+        "crit_aa": crit_aa,
     }
     if cfg.MODEL.arch_decoder.endswith('deepsup'):
         segmentation_module = SegmentationModule(
