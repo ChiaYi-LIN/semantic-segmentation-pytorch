@@ -81,6 +81,8 @@ _C.TRAIN.disp_iter = 20
 _C.TRAIN.seed = 304
 # use half-sized image as input
 _C.TRAIN.sr = False
+# use attention affinity loss to guide SSSR
+_C.TRAIN.use_aa_loss = False
 
 # -----------------------------------------------------------------------------
 # Validation
