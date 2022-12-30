@@ -29,6 +29,9 @@ class SegmentationModule(SegmentationModuleBase):
         self.decoder_sisr = options["decoder_sisr"]
         self.crit_sisr = options["crit_sisr"]
         self.crit_aa = options["crit_aa"]
+        self.w_1 = options.get("w_1", None)
+        self.w_2 = options.get("w_2", None)
+        self.w_3 = options.get("w_3", None)
 
     def forward(self, feed_dict, *, segSize=None):
         img_data = feed_dict['img_data']
@@ -82,9 +85,9 @@ class SegmentationModule(SegmentationModuleBase):
                     assert(len(loss_aa) == len(stage_indices) * len(block_indices))
                     loss_aa = torch.mean(torch.cat(loss_aa, dim=0), dim=0)
                     loss_dict["aa"] = loss_aa
-                    loss = loss_ss + loss_sisr + loss_aa
+                    loss = self.w_1 * loss_ss + self.w_2 * loss_sisr + self.w_3 * loss_aa
                 else:
-                    loss = loss_ss + loss_sisr
+                    loss = self.w_1 * loss_ss + self.w_2 * loss_sisr
 
             return loss, acc, loss_dict
         # inference

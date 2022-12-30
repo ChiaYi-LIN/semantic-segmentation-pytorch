@@ -32,6 +32,9 @@ TRAIN:
   seed: 304
   sr: True
   use_aa_loss: True
+  w_1: 1.0
+  w_2: 0.1
+  w_3: 1.0
 
 VAL:
   visualize: False

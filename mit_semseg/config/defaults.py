@@ -83,6 +83,10 @@ _C.TRAIN.seed = 304
 _C.TRAIN.sr = False
 # use attention affinity loss to guide SSSR
 _C.TRAIN.use_aa_loss = False
+# weight balance
+_C.TRAIN.w_1 = 1.0
+_C.TRAIN.w_2 = 0.1
+_C.TRAIN.w_3 = 1.0
 
 # -----------------------------------------------------------------------------
 # Validation

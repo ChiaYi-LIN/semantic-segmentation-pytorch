@@ -223,6 +223,9 @@ def main(cfg, gpus, logger):
         "decoder_sisr": net_decoder_sisr,
         "crit_sisr": crit_sisr,
         "crit_aa": crit_aa,
+        "w_1": cfg.TRAIN.w_1,
+        "w_2": cfg.TRAIN.w_2,
+        "w_3": cfg.TRAIN.w_3,
     }
     if cfg.MODEL.arch_decoder.endswith('deepsup'):
         segmentation_module = SegmentationModule(
