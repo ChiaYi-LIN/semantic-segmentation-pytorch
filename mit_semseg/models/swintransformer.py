@@ -256,7 +256,7 @@ class SwinTransformerDecoderSISRHead(nn.Module):
         # )
         self.inverse_normalize_transform = CustomTransforms().inverse_normalize_transform
     
-    def forward(self, x, segSize=None):
+    def forward(self, x: Tensor, segSize: tuple = None):
         """
         input: N, C, H, W
         output: N, C, H, W
