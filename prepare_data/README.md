@@ -1,0 +1,1 @@
+Scripts for preparing Cityscapes dataset is based on https://github.com/sacmehta/EdgeNets.
