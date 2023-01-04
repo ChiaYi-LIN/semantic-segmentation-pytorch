@@ -356,13 +356,15 @@ class Postprocess:
         ])
         self.to_pil = transforms.ToPILImage()
 
-    def clamp2pil(self, img: Tensor):
-        return self.to_pil(img.clamp(min=0.0, max=1.0))
+    def inverse2rgb(self, img: Tensor):
+        img = self.inverse_normalize_transform(img)
+        img = img.clamp(min=0.0, max=1.0) * 255.
+        return img
     
-    def img_inverse_transform(self, img: Tensor):
+    def inverse2pil(self, img: Tensor):
         # inverse normalize, and then 0-1 to 0-255
         img = self.inverse_normalize_transform(img)
-        img = self.clamp2pil(img)
+        img = self.to_pil(img.clamp(min=0.0, max=1.0))
         return img
     
     def psnr(self, img1, img2, crop_border=0, input_order='HWC', test_y_channel=False):
