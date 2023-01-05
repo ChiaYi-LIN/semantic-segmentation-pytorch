@@ -1,5 +1,6 @@
 # System libs
 import os
+import glob
 import time
 # import math
 import random
@@ -26,6 +27,7 @@ def train(segmentation_module, iterator, optimizers, history, epoch, cfg, logger
     ave_ss_loss = AverageMeter()
     ave_sisr_loss = AverageMeter()
     ave_aa_loss = AverageMeter()
+    ave_psnr = AverageMeter()
 
     segmentation_module.train(not cfg.TRAIN.fix_bn)
 
@@ -65,13 +67,16 @@ def train(segmentation_module, iterator, optimizers, history, epoch, cfg, logger
             ave_sisr_loss.update(loss_dict["sisr"].mean().data.item())
         if loss_dict["aa"] is not None:
             ave_aa_loss.update(loss_dict["aa"].mean().data.item())
+        if loss_dict["psnr"] is not None:
+            ave_psnr.update(loss_dict["psnr"].mean().data.item())
 
         # calculate accuracy, and display
         if i % cfg.TRAIN.disp_iter == 0:
             logger.info(f'Epoch: [{epoch}][{i}/{cfg.TRAIN.epoch_iters}], Time: {batch_time.average():.2f}, Data: {data_time.average():.2f}, '
                   f'lr_encoder: {cfg.TRAIN.running_lr_encoder:.6f}, lr_decoder: {cfg.TRAIN.running_lr_decoder:.6f}, '
                   f'Accuracy: {ave_acc.average():4.2f}, Loss: {ave_total_loss.average():.6f}, '
-                  f'Loss_ss: {ave_ss_loss.average():.6f}, Loss_sisr: {ave_sisr_loss.average():.6f}, Loss_aa: {ave_aa_loss.average():.6f}'
+                  f'Loss_ss: {ave_ss_loss.average():.6f}, Loss_sisr: {ave_sisr_loss.average():.6f}, Loss_aa: {ave_aa_loss.average():.6f}, '
+                  f'PSNR: {ave_psnr.average():.6f}'
             )
 
             fractional_epoch = epoch - 1 + 1. * i / cfg.TRAIN.epoch_iters
@@ -97,6 +102,11 @@ def checkpoint(nets, history, cfg, epoch, logger):
         dict_decoder,
         '{}/decoder_epoch_{}.pth'.format(cfg.DIR, epoch))
 
+    if net_decoder_sisr is not None:
+        dict_decoder_sisr = net_decoder_sisr.state_dict()
+        torch.save(
+            dict_decoder_sisr,
+            '{}/decoder_sisr_epoch_{}.pth'.format(cfg.DIR, epoch))
 
 def group_weight(module):
     group_decay = []
@@ -322,7 +332,9 @@ if __name__ == '__main__':
     # Output directory
     if not os.path.isdir(cfg.DIR):
         os.makedirs(cfg.DIR)
-    logger = setup_logger(distributed_rank=0, filename=os.path.join(cfg.DIR, 'train.log'))   # TODO
+    log_count = len(glob.glob(os.path.join(cfg.DIR, f'train_*.log')))
+    log_filename = os.path.join(cfg.DIR, f'train_{log_count}.log')
+    logger = setup_logger(distributed_rank=0, filename=log_filename)   # TODO
     logger.info("Loaded configuration file {}".format(args.cfg))
     logger.info("Running with config:\n{}".format(cfg))
     logger.info("Outputing checkpoints to: {}".format(cfg.DIR))
