@@ -1,13 +1,16 @@
+import numpy as np
 import torch
 import torch.nn as nn
 from . import resnet, resnext, mobilenet, hrnet, swintransformer
 from mit_semseg.lib.nn import SynchronizedBatchNorm2d
+from mit_semseg.lib.utils.calculate_psnr_ssim import Postprocess
 BatchNorm2d = SynchronizedBatchNorm2d
 
 
 class SegmentationModuleBase(nn.Module):
     def __init__(self):
         super(SegmentationModuleBase, self).__init__()
+        self.postprocess = Postprocess()
 
     def pixel_acc(self, pred, label):
         _, preds = torch.max(pred, dim=1)
@@ -27,8 +30,8 @@ class SegmentationModule(SegmentationModuleBase):
         self.deep_sup_scale = deep_sup_scale
         self.sr = options["sr"]
         self.decoder_sisr = options["decoder_sisr"]
-        self.crit_sisr = options["crit_sisr"]
-        self.crit_aa = options["crit_aa"]
+        self.crit_sisr = options.get("crit_sisr", None)
+        self.crit_aa = options.get("crit_aa", None)
         self.w_1 = options.get("w_1", None)
         self.w_2 = options.get("w_2", None)
         self.w_3 = options.get("w_3", None)
@@ -46,6 +49,7 @@ class SegmentationModule(SegmentationModuleBase):
                 "ss": None,
                 "sisr": None,
                 "aa": None,
+                "psnr" : None,
             }
 
             # Shared Encoder
@@ -70,7 +74,7 @@ class SegmentationModule(SegmentationModuleBase):
             # SISR Path
             if self.decoder_sisr is not None:
                 pred_sisr = self.decoder_sisr(encode_feats, segSize=(img_data.shape[2], img_data.shape[3]))
-                loss_sisr = self.crit_sisr(pred_sisr, img_data)
+                loss_sisr = self.crit_sisr(self.postprocess.inverse2rgb(pred_sisr), self.postprocess.inverse2rgb(img_data))
                 loss_dict["sisr"] = loss_sisr
 
                 if self.crit_aa is not None:
@@ -89,12 +93,26 @@ class SegmentationModule(SegmentationModuleBase):
                 else:
                     loss = self.w_1 * loss_ss + self.w_2 * loss_sisr
 
+                batch_size = pred_sisr.shape[0]
+                psnr = 0.0
+                for i in range(batch_size):
+                    rgb_pred = self.postprocess.inverse2pil(pred_sisr[i])
+                    rgb_gt = self.postprocess.inverse2pil(img_data[i])
+                    psnr += self.postprocess.psnr(np.array(rgb_pred), np.array(rgb_gt))
+                loss_dict["psnr"] = torch.tensor(psnr / batch_size).to(img_data.device)
+
             return loss, acc, loss_dict
         # inference
         else:
+            output_dict = {
+                "segment": None,
+                "reconstruct": None,
+            }
             encode_feats = self.encoder(input_img, return_feature_maps=True)
-            pred = self.decoder(encode_feats, segSize=segSize)
-            return pred
+            output_dict["segment"] = self.decoder(encode_feats, segSize=segSize)
+            if self.decoder_sisr is not None:
+                output_dict["reconstruct"] = self.decoder_sisr(encode_feats, segSize=segSize)
+            return output_dict
 
 
 class ModelBuilder:
