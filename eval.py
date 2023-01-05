@@ -1,5 +1,6 @@
 # System libs
 import os
+import glob
 import time
 import argparse
 from packaging.version import Version
@@ -15,6 +16,7 @@ from mit_semseg.models import ModelBuilder, SegmentationModule
 from mit_semseg.utils import AverageMeter, colorEncode, accuracy, intersectionAndUnion, setup_logger
 from mit_semseg.lib.nn import user_scattered_collate, async_copy_to
 from mit_semseg.lib.utils import as_numpy
+from mit_semseg.lib.utils.calculate_psnr_ssim import Postprocess
 from PIL import Image
 from tqdm import tqdm
 
@@ -42,9 +44,11 @@ def evaluate(segmentation_module, loader, cfg, gpu, logger):
     acc_meter = AverageMeter()
     intersection_meter = AverageMeter()
     union_meter = AverageMeter()
+    psnr_meter = AverageMeter()
     time_meter = AverageMeter()
 
     segmentation_module.eval()
+    postprocess = Postprocess()
 
     pbar = tqdm(total=len(loader))
     for batch_data in loader:
@@ -63,6 +67,8 @@ def evaluate(segmentation_module, loader, cfg, gpu, logger):
 
             scores = torch.zeros(1, cfg.DATASET.num_class, segSize[0], segSize[1])
             scores = async_copy_to(scores, gpu)
+            reconstructs = torch.zeros(1, 3, segSize[0], segSize[1])
+            reconstructs = async_copy_to(reconstructs, gpu)
 
             for img in img_resized_list:
                 feed_dict = batch_data.copy()
@@ -72,11 +78,23 @@ def evaluate(segmentation_module, loader, cfg, gpu, logger):
                 feed_dict = async_copy_to(feed_dict, gpu)
 
                 # forward pass
-                scores_tmp = segmentation_module(feed_dict, segSize=segSize)
+                output_dict = segmentation_module(feed_dict, segSize=segSize)
+                scores_tmp = output_dict.get("segment", None)
+                reconstructs_tmp = output_dict.get("reconstruct", None)
+
                 scores = scores + scores_tmp / len(cfg.DATASET.imgSizes)
+                if reconstructs_tmp is not None:
+                    reconstructs = reconstructs + reconstructs_tmp / len(cfg.DATASET.imgSizes)
 
             _, pred = torch.max(scores, dim=1)
             pred = as_numpy(pred.squeeze(0).cpu())
+            if reconstructs_tmp is not None:
+                rgb_gt = batch_data['img_ori']
+                rgb_pred = np.array(postprocess.inverse2pil(reconstructs[0]))
+                assert (rgb_gt.shape[0] == segSize[0] and rgb_gt.shape[1] == segSize[1])
+                assert (rgb_pred.shape[0] == segSize[0] and rgb_pred.shape[1] == segSize[1])
+                psnr = postprocess.psnr(rgb_gt, rgb_pred)
+                psnr_meter.update(psnr)
 
         torch.cuda.synchronize()
         time_meter.update(time.perf_counter() - tic)
@@ -104,8 +122,7 @@ def evaluate(segmentation_module, loader, cfg, gpu, logger):
         logger.info('class [{}], IoU: {:.4f}'.format(i, _iou))
 
     logger.info('[Eval Summary]:')
-    logger.info('Mean IoU: {:.4f}, Accuracy: {:.2f}%, Inference Time: {:.4f}s'
-          .format(iou.mean(), acc_meter.average()*100, time_meter.average()))
+    logger.info(f'Mean IoU: {iou.mean():.4f}, Accuracy: {acc_meter.average()*100:.2f}%, PSNR: {psnr_meter.average():.4f}, Inference Time: {time_meter.average():.4f}s')
 
 
 def main(cfg, gpu, logger):
@@ -122,14 +139,18 @@ def main(cfg, gpu, logger):
         num_class=cfg.DATASET.num_class,
         weights=cfg.MODEL.weights_decoder,
         use_softmax=True)
+    if cfg.MODEL.arch_decoder_sisr != "":
+        net_decoder_sisr = ModelBuilder.build_decoder_sisr(
+            arch=cfg.MODEL.arch_decoder_sisr.lower(),
+            weights=cfg.MODEL.weights_decoder_sisr)
+    else:
+        net_decoder_sisr = None
 
     crit = nn.NLLLoss(ignore_index=-1)
 
     options = {
         "sr": cfg.TRAIN.sr,
-        "decoder_sisr": None,
-        "crit_sisr": None,
-        "crit_aa": None,
+        "decoder_sisr": net_decoder_sisr,
     }
     segmentation_module = SegmentationModule(net_encoder, net_decoder, crit, options=options)
 
@@ -185,7 +206,9 @@ if __name__ == '__main__':
     cfg.merge_from_list(args.opts)
     # cfg.freeze()
 
-    logger = setup_logger(distributed_rank=0, filename=os.path.join(cfg.DIR, 'eval.log'))   # TODO
+    log_count = len(glob.glob(os.path.join(cfg.DIR, f'eval_*.log')))
+    log_filename = os.path.join(cfg.DIR, f'eval_{log_count}.log')
+    logger = setup_logger(distributed_rank=0, filename=log_filename)   # TODO
     logger.info("Loaded configuration file {}".format(args.cfg))
     logger.info("Running with config:\n{}".format(cfg))
 
@@ -196,6 +219,9 @@ if __name__ == '__main__':
         cfg.DIR, 'decoder_' + cfg.VAL.checkpoint)
     assert os.path.exists(cfg.MODEL.weights_encoder) and \
         os.path.exists(cfg.MODEL.weights_decoder), "checkpoint does not exitst!"
+    if cfg.MODEL.arch_decoder_sisr != "":
+        cfg.MODEL.weights_decoder_sisr = os.path.join(
+            cfg.DIR, 'decoder_sisr_' + cfg.VAL.checkpoint)
 
     if not os.path.isdir(os.path.join(cfg.DIR, "result")):
         os.makedirs(os.path.join(cfg.DIR, "result"))
