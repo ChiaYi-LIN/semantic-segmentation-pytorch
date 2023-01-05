@@ -76,13 +76,6 @@ def transconv3x3_bn_relu(in_planes, out_planes, stride=2):
     )
 
 
-class CustomTransforms:
-    def __init__(self) -> None:
-        self.inverse_normalize_transform = transforms.Compose([
-            transforms.Normalize(mean=[0., 0., 0.], std = [1/0.229, 1/0.224, 1/0.225]),
-            transforms.Normalize(mean=[-0.485, -0.456, -0.406], std = [1., 1., 1.]),
-        ])
-
 class SwinTransformerDecoder(nn.Module):
     """
     Implements Swin Transformer Decoder Head.
@@ -240,34 +233,29 @@ class SwinTransformerDecoderSISRHead(nn.Module):
         super().__init__()
         if norm_layer is None:
             norm_layer = partial(nn.LayerNorm, eps=1e-5)
-        self.project = nn.Sequential(
-                nn.Linear(in_dim, hidden_dim),
-                norm_layer(hidden_dim),
+        scale = 4
+        assert(in_dim % (scale ** 2) == 0)
+        self.upsample = nn.Sequential(
+                nn.Conv2d(in_channels=in_dim, out_channels=in_dim, kernel_size=3, stride=1, padding=1),
+                nn.PixelShuffle(scale),
         )
         self.layers = nn.Sequential(
+                nn.Linear(in_dim // (scale ** 2), hidden_dim),
+                norm_layer(hidden_dim),
                 nn.ReLU(inplace=True),
                 nn.Linear(hidden_dim, out_channel),
         )
 
-        # scale = 8
-        # self.upsample = nn.Sequential(
-        #     nn.Conv2d(hidden_dim, (scale ** 2) * out_channel, 3, 1, 1),
-        #     nn.PixelShuffle(scale)
-        # )
-        self.inverse_normalize_transform = CustomTransforms().inverse_normalize_transform
-    
     def forward(self, x: Tensor, segSize: tuple = None):
         """
         input: N, C, H, W
         output: N, C, H, W
         """
-        x = self.project(x.permute(0, 2, 3, 1)).permute(0, 3, 1, 2)
-        # x = self.upsample(x)
-        if x.shape[2] != segSize[0] or x.shape[3] != segSize[1]:
-            x = nn.functional.interpolate(x, size=segSize, mode='bilinear', align_corners=False)
-
+        x = self.upsample(x)
         x = self.layers(x.permute(0, 2, 3, 1)).permute(0, 3, 1, 2)
-        x = self.inverse_normalize_transform(x)
+        if x.shape[2] != segSize[0] or x.shape[3] != segSize[1]:
+            print(f"WARNING: Shape not match in SISR path, input = {x.shape[2:]} and segSize = {segSize}")
+            x = nn.functional.interpolate(x, size=segSize, mode='bilinear', align_corners=False)        
 
         return x    
 
@@ -426,7 +414,7 @@ def sa_shifted_window_attention(
             attn = attn.view(-1, num_heads, x.size(1), x.size(1))
 
         attn = F.softmax(attn, dim=-1)
-        attn = F.dropout(attn, p=attention_dropout) # B*nW, nHead, Ws, Ws
+        attn = F.dropout(attn, p=attention_dropout) # B*nW, nHead, Ws*Ws, Ws*Ws
 
     x = attn.matmul(v).transpose(1, 2).reshape(x.size(0), x.size(1), C)
     x = F.linear(x, proj_weight, proj_bias)
