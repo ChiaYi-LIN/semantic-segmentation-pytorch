@@ -22,86 +22,93 @@ class SegmentationModuleBase(nn.Module):
 
 
 class SegmentationModule(SegmentationModuleBase):
-    def __init__(self, net_enc, net_dec, crit, deep_sup_scale=None, options=None):
+    def __init__(self, net_encoder, net_decoder_ss, net_decoder_sr, crit_ss=None, crit_sr=None, crit_aff=None, options=None):
         super(SegmentationModule, self).__init__()
-        self.encoder = net_enc
-        self.decoder = net_dec
-        self.crit = crit
-        self.deep_sup_scale = deep_sup_scale
-        self.sr = options["sr"]
-        self.decoder_sisr = options["decoder_sisr"]
-        self.crit_sisr = options.get("crit_sisr", None)
-        self.crit_aa = options.get("crit_aa", None)
-        self.w_1 = options.get("w_1", None)
-        self.w_2 = options.get("w_2", None)
-        self.w_3 = options.get("w_3", None)
+        self.encoder = net_encoder
+        self.decoder_ss = net_decoder_ss
+        self.decoder_sr = net_decoder_sr
+        self.crit_ss = crit_ss
+        self.crit_sr = crit_sr
+        self.crit_aff = crit_aff
+        if options is not None:
+            self.aff_loss = options.get("aff_loss", None)
+            self.w_1 = options.get("w_1", None)
+            self.w_2 = options.get("w_2", None)
+            self.w_3 = options.get("w_3", None)
+            self.deep_sup_scale = options.get("deep_sup_scale", None)
 
     def forward(self, feed_dict, *, segSize=None):
         img_data = feed_dict['img_data']
-        if self.sr:
-            input_img = nn.functional.interpolate(img_data, size=(img_data.shape[2] // 2, img_data.shape[3] // 2), mode='bicubic', align_corners=False)
-        else:
-            input_img = img_data
+        input_img = nn.functional.interpolate(img_data, size=(img_data.shape[2] // 2, img_data.shape[3] // 2), mode='bicubic', align_corners=False)
         # training
         if segSize is None:
             # Loss Tracker
+            loss = None
             loss_dict = {
+                "acc": None,
                 "ss": None,
-                "sisr": None,
-                "aa": None,
+                "sr": None,
+                "aff": None,
                 "psnr" : None,
             }
 
             # Shared Encoder
             encode_feats = self.encoder(input_img, return_feature_maps=True)
 
-            # SSSR Path
-            seg_label = feed_dict['seg_label']
-            if self.deep_sup_scale is not None: # use deep supervision technique
-                (pred, pred_deepsup) = self.decoder(encode_feats)
-            else:
-                pred = self.decoder(encode_feats, segSize=(seg_label.shape[1], seg_label.shape[2]))
-            
-            if self.deep_sup_scale is not None:
-                loss_ss = self.crit(pred, seg_label) + self.deep_sup_scale * self.crit(pred_deepsup, seg_label)
-            else:
-                loss_ss = self.crit(pred, seg_label)
-            loss_dict["ss"] = loss_ss
+            # SS Path
+            if self.decoder_ss is not None:
+                seg_label = feed_dict['seg_label']
+                if self.deep_sup_scale is not None: # use deep supervision technique
+                    (pred, pred_deepsup) = self.decoder_ss(encode_feats)
+                else:
+                    pred_ss, decode_feats_ss = self.decoder_ss(encode_feats, segSize=(seg_label.shape[1], seg_label.shape[2]), return_feature_maps=True)
+                
+                if self.deep_sup_scale is not None:
+                    loss_ss = self.crit_ss(pred, seg_label) + self.deep_sup_scale * self.crit_ss(pred_deepsup, seg_label)
+                else:
+                    loss_ss = self.crit_ss(pred_ss, seg_label)
+                
+                loss_dict["ss"] = loss_ss
+                loss_dict["acc"] = self.pixel_acc(pred, seg_label)
 
-            loss = loss_ss
-            acc = self.pixel_acc(pred, seg_label)
+                if loss is None:
+                    loss = self.w_1 * loss_ss
+                else:
+                    loss += self.w_1 * loss_ss
 
-            # SISR Path
-            if self.decoder_sisr is not None:
-                pred_sisr = self.decoder_sisr(encode_feats, segSize=(img_data.shape[2], img_data.shape[3]))
-                loss_sisr = self.crit_sisr(self.postprocess.inverse2rgb(pred_sisr), self.postprocess.inverse2rgb(img_data))
-                loss_dict["sisr"] = loss_sisr
+            # SR Path
+            if self.decoder_sr is not None:
+                pred_sr, decode_feats_sr = self.decoder_sr(encode_feats, segSize=(img_data.shape[2], img_data.shape[3]), return_feature_maps=True)
+                loss_sr = self.crit_sisr(self.postprocess.inverse2rgb(pred_sr), self.postprocess.inverse2rgb(img_data))
+                loss_dict["sr"] = loss_sr
 
-                if self.crit_aa is not None:
-                    loss_aa = []
+                if loss is None:
+                    loss = self.w_2 * loss_sr
+                else:
+                    loss += self.w_2 * loss_sr
+
+            # Affinity
+            if self.decoder_ss is not None and self.decoder_sr is not None and self.crit_aff is not None:
+                if self.aff_loss == "aa":
+                    attns_ss = []
+                    attns_sr = []
                     stage_indices = [0, 2, 4, 6]
                     block_indices = [0, 1]
                     for stage_index in stage_indices:
                         for block_index in block_indices:
-                            loss_aa.append(
-                                self.crit_aa(self.decoder.body[stage_index][block_index].attn.attn_score, self.decoder_sisr.body[stage_index][block_index].attn.attn_score).unsqueeze(0)
-                            )
-                    assert(len(loss_aa) == len(stage_indices) * len(block_indices))
-                    loss_aa = torch.mean(torch.cat(loss_aa, dim=0), dim=0)
-                    loss_dict["aa"] = loss_aa
-                    loss = self.w_1 * loss_ss + self.w_2 * loss_sisr + self.w_3 * loss_aa
-                else:
-                    loss = self.w_1 * loss_ss + self.w_2 * loss_sisr
+                            attn_ss = self.decoder_ss.body[stage_index][block_index].attn.attn_score
+                            attn_sr = self.decoder_sr.body[stage_index][block_index].attn.attn_score
+                            attns_ss.append(attn_ss.view(-1, attn_ss.shape[2], attn_ss.shape[3]))
+                            attns_sr.append(attn_sr.view(-1, attn_sr.shape[2], attn_sr.shape[3]))
+                    loss_aff = self.crit_aff(torch.cat(attns_ss, dim=0), torch.cat(attns_sr, dim=0))
+                    loss_dict["aff"] = loss_aff
 
-                batch_size = pred_sisr.shape[0]
-                psnr = 0.0
-                for i in range(batch_size):
-                    rgb_pred = self.postprocess.inverse2pil(pred_sisr[i])
-                    rgb_gt = self.postprocess.inverse2pil(img_data[i])
-                    psnr += self.postprocess.psnr(np.array(rgb_pred), np.array(rgb_gt))
-                loss_dict["psnr"] = torch.tensor(psnr / batch_size).to(img_data.device)
+                    if loss is None:
+                        loss = self.w_3 * loss_aff
+                    else:
+                        loss += self.w_3 * loss_aff
 
-            return loss, acc, loss_dict
+            return loss, loss_dict
         # inference
         else:
             output_dict = {
@@ -109,9 +116,111 @@ class SegmentationModule(SegmentationModuleBase):
                 "reconstruct": None,
             }
             encode_feats = self.encoder(input_img, return_feature_maps=True)
-            output_dict["segment"] = self.decoder(encode_feats, segSize=segSize)
-            if self.decoder_sisr is not None:
-                output_dict["reconstruct"] = self.decoder_sisr(encode_feats, segSize=segSize)
+            if self.decoder_ss is not None:
+                output_dict["segment"] = self.decoder_ss(encode_feats, segSize=segSize)
+            if self.decoder_sr is not None:
+                output_dict["reconstruct"] = self.decoder_sr(encode_feats, segSize=segSize)
+            return output_dict
+
+
+class SegmentationModuleCity(SegmentationModule):
+    def __init__(self, net_encoder, net_decoder_ss, net_decoder_sr, crit_ss=None, crit_sr=None, crit_aff=None, options=None):
+        super(SegmentationModuleCity, self).__init__(net_encoder, net_decoder_ss, net_decoder_sr, crit_ss, crit_sr, crit_aff, options)
+
+    def forward(self, feed_dict, *, segSize=None):
+        img_data = feed_dict['img_data']
+        
+        # training
+        if segSize is None:
+            # Loss Tracker
+            loss = None
+            loss_dict = {
+                "acc": None,
+                "ss": None,
+                "sr": None,
+                "aff": None,
+                "psnr" : None,
+            }
+
+            # Shared Encoder
+            encode_feats = self.encoder(img_data, return_feature_maps=True)
+
+            # SS Path
+            if self.decoder_ss is not None:
+                seg_label = feed_dict['seg_label']
+                pred_ss, decode_feats_ss = self.decoder_ss(encode_feats, segSize=(seg_label.shape[1], seg_label.shape[2]), return_feature_maps=True)
+                loss_ss = self.crit_ss(pred_ss, seg_label)
+                
+                loss_dict["ss"] = loss_ss
+                loss_dict["acc"] = self.pixel_acc(pred_ss, seg_label)
+
+                if loss is None:
+                    loss = self.w_1 * loss_ss
+                else:
+                    loss += self.w_1 * loss_ss
+
+            # SR Path
+            if self.decoder_sr is not None:
+                img_ori = feed_dict['img_ori']
+                pred_sr, decode_feats_sr = self.decoder_sr(encode_feats, segSize=(img_ori.shape[2], img_ori.shape[3]), return_feature_maps=True)
+                loss_sr = self.crit_sr(self.postprocess.inverse2rgb(pred_sr), self.postprocess.inverse2rgb(img_ori))
+                loss_dict["sr"] = loss_sr
+
+                if loss is None:
+                    loss = self.w_2 * loss_sr
+                else:
+                    loss += self.w_2 * loss_sr
+
+            # Affinity
+            if self.decoder_ss is not None and self.decoder_sr is not None and self.crit_aff is not None:
+                if self.aff_loss == "aa":
+                    attns_ss = []
+                    attns_sr = []
+                    stage_indices = [0, 2, 4, 6]
+                    block_indices = [0, 1]
+                    for stage_index in stage_indices:
+                        for block_index in block_indices:
+                            attn_ss = self.decoder_ss.body[stage_index][block_index].attn.attn_score
+                            attn_sr = self.decoder_sr.body[stage_index][block_index].attn.attn_score
+                            attns_ss.append(attn_ss.view(-1, attn_ss.shape[2], attn_ss.shape[3]))
+                            attns_sr.append(attn_sr.view(-1, attn_sr.shape[2], attn_sr.shape[3]))
+                    loss_aff = self.crit_aff(torch.cat(attns_ss, dim=0), torch.cat(attns_sr, dim=0))
+                    loss_dict["aff"] = loss_aff
+
+                elif self.aff_loss == "fa":
+                    decode_feats_ss = torch.nn.functional.normalize(decode_feats_ss, p=2, dim=-1).view(decode_feats_ss.shape[0], -1, decode_feats_ss.shape[3])
+                    decode_feats_sr = torch.nn.functional.normalize(decode_feats_sr, p=2, dim=-1).view(decode_feats_sr.shape[0], -1, decode_feats_sr.shape[3])
+                    sim_matrix_ss = torch.bmm(decode_feats_ss, decode_feats_ss.permute(0, 2, 1))
+                    sim_matrix_sr = torch.bmm(decode_feats_sr, decode_feats_sr.permute(0, 2, 1))
+                    loss_aff = self.crit_aff(sim_matrix_ss, sim_matrix_sr)
+                    loss_dict["aff"] = loss_aff
+
+                if loss is None:
+                    loss = self.w_3 * loss_aff
+                else:
+                    loss += self.w_3 * loss_aff
+    
+            # batch_size = pred_sisr.shape[0]
+            # psnr = 0.0
+            # for i in range(batch_size):
+            #     rgb_pred = self.postprocess.inverse2pil(pred_sisr[i])
+            #     rgb_gt = self.postprocess.inverse2pil(img_ori[i])
+            #     psnr += self.postprocess.psnr(np.array(rgb_pred), np.array(rgb_gt))
+            # loss_dict["psnr"] = torch.tensor(psnr / batch_size).to(img_ori.device)
+
+            return loss, loss_dict
+
+        # inference
+        else:
+            output_dict = {
+                "segment": None,
+                "reconstruct": None,
+            }
+            encode_feats = self.encoder(img_data, return_feature_maps=True)
+            if self.decoder_ss is not None:
+                output_dict["segment"] = self.decoder_ss(encode_feats, segSize=segSize)
+            if self.decoder_sr is not None:
+                output_dict["reconstruct"] = self.decoder_sr(encode_feats, segSize=segSize)
             return output_dict
 
 
@@ -181,7 +290,7 @@ class ModelBuilder:
         return net_encoder
 
     @staticmethod
-    def build_decoder(arch='ppm_deepsup',
+    def build_decoder_ss(arch='ppm_deepsup',
                       fc_dim=512, num_class=150,
                       weights='', use_softmax=False):
         arch = arch.lower()
@@ -217,11 +326,24 @@ class ModelBuilder:
                 fc_dim=fc_dim,
                 use_softmax=use_softmax,
                 fpn_dim=512)
-        elif arch == 'swin_t':
+        elif arch == 'swin_t_v1':
             net_decoder = swintransformer.SwinTransformerDecoder(
                 head="SSSR",
                 num_class=num_class,
-                use_softmax=use_softmax)
+                use_softmax=use_softmax,
+                version="v1")
+        elif arch == 'swin_t_v2':
+            net_decoder = swintransformer.SwinTransformerDecoder(
+                head="SSSR",
+                num_class=num_class,
+                use_softmax=use_softmax,
+                version="v2")
+        elif arch == 'swin_t_v3':
+            net_decoder = swintransformer.SwinTransformerDecoder(
+                head="SSSR",
+                num_class=num_class,
+                use_softmax=use_softmax,
+                version="v3")
         else:
             raise Exception('Architecture undefined!')
 
@@ -234,11 +356,20 @@ class ModelBuilder:
     
     
     @staticmethod
-    def build_decoder_sisr(arch='swin_t', weights=''):
+    def build_decoder_sr(arch='swin_t', weights=''):
         arch = arch.lower()
-        if arch == 'swin_t':
+        if arch == 'swin_t_v1':
             net_decoder_sisr = swintransformer.SwinTransformerDecoder(
-                head="SISR")
+                head="SISR",
+                version="v1")
+        elif arch == 'swin_t_v2':
+            net_decoder_sisr = swintransformer.SwinTransformerDecoder(
+                head="SISR",
+                version="v2")
+        elif arch == 'swin_t_v3':
+            net_decoder_sisr = swintransformer.SwinTransformerDecoder(
+                head="SISR",
+                version="v3")
         else:
             raise Exception('Architecture undefined!')
         
@@ -441,7 +572,7 @@ class SwinTransformer(nn.Module):
         x = self.layer1(self.embed(x)); feat_out.append(x.permute(0, 3, 1, 2));
         x = self.layer2(self.merge1(x)); feat_out.append(x.permute(0, 3, 1, 2));
         x = self.layer3(self.merge2(x)); feat_out.append(x.permute(0, 3, 1, 2));
-        x = self.norm(self.layer4(self.merge3(x))); feat_out.append(x.permute(0, 3, 1, 2));
+        x = self.layer4(self.merge3(x)); feat_out.append(x.permute(0, 3, 1, 2));
 
         if return_feature_maps:
             return feat_out
