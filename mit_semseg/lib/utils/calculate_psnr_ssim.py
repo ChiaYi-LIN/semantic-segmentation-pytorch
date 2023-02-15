@@ -357,8 +357,7 @@ class Postprocess:
         self.to_pil = transforms.ToPILImage()
 
     def inverse2rgb(self, img: Tensor):
-        img = self.inverse_normalize_transform(img)
-        img = img.clamp(min=0.0, max=1.0) * 255.
+        img = self.inverse_normalize_transform(img) * 255.
         return img
     
     def inverse2pil(self, img: Tensor):
