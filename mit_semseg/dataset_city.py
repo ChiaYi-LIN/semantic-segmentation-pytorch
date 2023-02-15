@@ -6,7 +6,7 @@ import random
 import math
 import numpy as np
 from PIL import Image
-from dataset import imresize, randomCrop, BaseDataset
+from mit_semseg.dataset import imresize, BaseDataset
 
 
 class BaseDatasetCity(BaseDataset):
