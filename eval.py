@@ -12,7 +12,8 @@ from scipy.io import loadmat
 # Our libs
 from mit_semseg.config import cfg
 from mit_semseg.dataset import ValDataset
-from mit_semseg.models import ModelBuilder, SegmentationModule
+from mit_semseg.dataset_city import ValDatasetCity
+from mit_semseg.models import ModelBuilder, SegmentationModule, SegmentationModuleCity
 from mit_semseg.utils import AverageMeter, colorEncode, accuracy, intersectionAndUnion, setup_logger
 from mit_semseg.lib.nn import user_scattered_collate, async_copy_to
 from mit_semseg.lib.utils import as_numpy
@@ -61,9 +62,9 @@ def evaluate(segmentation_module, loader, cfg, gpu, logger):
         tic = time.perf_counter()
         with torch.no_grad():
             segSize = (seg_label.shape[0], seg_label.shape[1])
-            if segSize[0] > 900 or segSize[1] > 900:
-                pbar.update(1)
-                continue
+            # if segSize[0] > 900 or segSize[1] > 900:
+            #     pbar.update(1)
+            #     continue
 
             scores = torch.zeros(1, cfg.DATASET.num_class, segSize[0], segSize[1])
             scores = async_copy_to(scores, gpu)
@@ -82,12 +83,14 @@ def evaluate(segmentation_module, loader, cfg, gpu, logger):
                 scores_tmp = output_dict.get("segment", None)
                 reconstructs_tmp = output_dict.get("reconstruct", None)
 
-                scores = scores + scores_tmp / len(cfg.DATASET.imgSizes)
+                if scores_tmp is not None:
+                    scores = scores + scores_tmp / len(cfg.DATASET.imgSizes)
                 if reconstructs_tmp is not None:
                     reconstructs = reconstructs + reconstructs_tmp / len(cfg.DATASET.imgSizes)
-
-            _, pred = torch.max(scores, dim=1)
-            pred = as_numpy(pred.squeeze(0).cpu())
+            
+            if scores_tmp is not None:
+                _, pred = torch.max(scores, dim=1)
+                pred = as_numpy(pred.squeeze(0).cpu())
             if reconstructs_tmp is not None:
                 rgb_gt = batch_data['img_ori']
                 rgb_pred = np.array(postprocess.inverse2pil(reconstructs[0]))
@@ -100,30 +103,34 @@ def evaluate(segmentation_module, loader, cfg, gpu, logger):
         time_meter.update(time.perf_counter() - tic)
 
         # calculate accuracy
-        acc, pix = accuracy(pred, seg_label)
-        intersection, union = intersectionAndUnion(pred, seg_label, cfg.DATASET.num_class)
-        acc_meter.update(acc, pix)
-        intersection_meter.update(intersection)
-        union_meter.update(union)
+        if scores_tmp is not None:
+            acc, pix = accuracy(pred, seg_label)
+            intersection, union = intersectionAndUnion(pred, seg_label, cfg.DATASET.num_class)
+            acc_meter.update(acc, pix)
+            intersection_meter.update(intersection)
+            union_meter.update(union)
 
-        # visualization
-        if cfg.VAL.visualize:
-            visualize_result(
-                (batch_data['img_ori'], seg_label, batch_data['info']),
-                pred,
-                os.path.join(cfg.DIR, 'result')
-            )
+            # visualization
+            if cfg.VAL.visualize:
+                visualize_result(
+                    (batch_data['img_ori'], seg_label, batch_data['info']),
+                    pred,
+                    os.path.join(cfg.DIR, 'result')
+                )
 
         pbar.update(1)
 
     # summary
-    iou = intersection_meter.sum / (union_meter.sum + 1e-10)
-    for i, _iou in enumerate(iou):
-        logger.info('class [{}], IoU: {:.4f}'.format(i, _iou))
+    if scores_tmp is not None:
+        iou = intersection_meter.sum / (union_meter.sum + 1e-10)
+        for i, _iou in enumerate(iou):
+            logger.info('class [{}], IoU: {:.4f}'.format(i, _iou))
 
-    logger.info('[Eval Summary]:')
-    logger.info(f'Mean IoU: {iou.mean():.4f}, Accuracy: {acc_meter.average()*100:.2f}%, PSNR: {psnr_meter.average():.4f}, Inference Time: {time_meter.average():.4f}s')
-
+        logger.info('[Eval Summary]:')
+        logger.info(f'Mean IoU: {iou.mean():.4f}, Accuracy: {acc_meter.average()*100:.2f}%, PSNR: {psnr_meter.average():.4f}, Inference Time: {time_meter.average():.4f}s')
+    else:
+        logger.info('[Eval Summary]:')
+        logger.info(f'PSNR: {psnr_meter.average():.4f}, Inference Time: {time_meter.average():.4f}s')
 
 def main(cfg, gpu, logger):
     torch.cuda.set_device(gpu)
@@ -133,32 +140,41 @@ def main(cfg, gpu, logger):
         arch=cfg.MODEL.arch_encoder.lower(),
         fc_dim=cfg.MODEL.fc_dim,
         weights=cfg.MODEL.weights_encoder)
-    net_decoder = ModelBuilder.build_decoder(
-        arch=cfg.MODEL.arch_decoder.lower(),
-        fc_dim=cfg.MODEL.fc_dim,
-        num_class=cfg.DATASET.num_class,
-        weights=cfg.MODEL.weights_decoder,
-        use_softmax=True)
-    if cfg.MODEL.arch_decoder_sisr != "":
-        net_decoder_sisr = ModelBuilder.build_decoder_sisr(
-            arch=cfg.MODEL.arch_decoder_sisr.lower(),
-            weights=cfg.MODEL.weights_decoder_sisr)
+    if cfg.MODEL.arch_decoder_ss != "":
+        net_decoder_ss = ModelBuilder.build_decoder_ss(
+            arch=cfg.MODEL.arch_decoder_ss.lower(),
+            fc_dim=cfg.MODEL.fc_dim,
+            num_class=cfg.DATASET.num_class,
+            weights=cfg.MODEL.weights_decoder_ss,
+            use_softmax=True)
     else:
-        net_decoder_sisr = None
+        net_decoder_ss = None
+    if cfg.MODEL.arch_decoder_sr != "":
+        net_decoder_sr = ModelBuilder.build_decoder_sr(
+            arch=cfg.MODEL.arch_decoder_sr.lower(),
+            weights=cfg.MODEL.weights_decoder_sr)
+    else:
+        net_decoder_sr = None
+    logger.info(f"Encoder arch:\n{net_encoder}")  
+    logger.info(f"Decoder_ss arch:\n{net_decoder_ss}")
+    logger.info(f"Decoder_sr arch:\n{net_decoder_sr}")
 
-    crit = nn.NLLLoss(ignore_index=-1)
-
-    options = {
-        "sr": cfg.TRAIN.sr,
-        "decoder_sisr": net_decoder_sisr,
-    }
-    segmentation_module = SegmentationModule(net_encoder, net_decoder, crit, options=options)
+    if "city" in cfg.DATASET.root_dataset:
+        segmentation_module = SegmentationModuleCity(net_encoder, net_decoder_ss, net_decoder_sr)
+    else:
+        segmentation_module = SegmentationModule(net_encoder, net_decoder_ss, net_decoder_sr)
 
     # Dataset and Loader
-    dataset_val = ValDataset(
-        cfg.DATASET.root_dataset,
-        cfg.DATASET.list_val,
-        cfg.DATASET)
+    if "city" in cfg.DATASET.root_dataset:
+        dataset_val = ValDatasetCity(
+            cfg.DATASET.root_dataset,
+            cfg.DATASET.list_val,
+            cfg.DATASET)
+    else:
+        dataset_val = ValDataset(
+            cfg.DATASET.root_dataset,
+            cfg.DATASET.list_val,
+            cfg.DATASET)
     loader_val = torch.utils.data.DataLoader(
         dataset_val,
         batch_size=cfg.VAL.batch_size,
@@ -215,13 +231,15 @@ if __name__ == '__main__':
     # absolute paths of model weights
     cfg.MODEL.weights_encoder = os.path.join(
         cfg.DIR, 'encoder_' + cfg.VAL.checkpoint)
-    cfg.MODEL.weights_decoder = os.path.join(
-        cfg.DIR, 'decoder_' + cfg.VAL.checkpoint)
-    assert os.path.exists(cfg.MODEL.weights_encoder) and \
-        os.path.exists(cfg.MODEL.weights_decoder), "checkpoint does not exitst!"
-    if cfg.MODEL.arch_decoder_sisr != "":
-        cfg.MODEL.weights_decoder_sisr = os.path.join(
-            cfg.DIR, 'decoder_sisr_' + cfg.VAL.checkpoint)
+    assert os.path.exists(cfg.MODEL.weights_encoder), "encoder checkpoint does not exitst!"
+    if cfg.MODEL.arch_decoder_ss != "":
+        cfg.MODEL.weights_decoder_ss = os.path.join(
+            cfg.DIR, 'decoder_ss_' + cfg.VAL.checkpoint)
+        assert os.path.exists(cfg.MODEL.weights_decoder_ss), "decoder_ss checkpoint does not exitst!"
+    if cfg.MODEL.arch_decoder_sr != "":
+        cfg.MODEL.weights_decoder_sr = os.path.join(
+            cfg.DIR, 'decoder_sr_' + cfg.VAL.checkpoint)
+        assert os.path.exists(cfg.MODEL.weights_decoder_sr), "decoder_sr checkpoint does not exitst!"
 
     if not os.path.isdir(os.path.join(cfg.DIR, "result")):
         os.makedirs(os.path.join(cfg.DIR, "result"))
