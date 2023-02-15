@@ -35,15 +35,15 @@ _C.MODEL = CN()
 # architecture of net_encoder
 _C.MODEL.arch_encoder = "resnet50dilated"
 # architecture of net_decoder
-_C.MODEL.arch_decoder = "ppm_deepsup"
+_C.MODEL.arch_decoder_ss = ""
 # architecture of net_decoder_sisr
-_C.MODEL.arch_decoder_sisr = ""
+_C.MODEL.arch_decoder_sr = ""
 # weights to finetune net_encoder
 _C.MODEL.weights_encoder = ""
 # weights to finetune net_decoder
-_C.MODEL.weights_decoder = ""
+_C.MODEL.weights_decoder_ss = ""
 # weights to finetune net_decoder_sisr
-_C.MODEL.weights_decoder_sisr = ""
+_C.MODEL.weights_decoder_sr = ""
 # number of feature channels between encoder and decoder
 _C.MODEL.fc_dim = 2048
 
@@ -81,8 +81,8 @@ _C.TRAIN.disp_iter = 20
 _C.TRAIN.seed = 304
 # use half-sized image as input
 _C.TRAIN.sr = False
-# use attention affinity loss to guide SSSR
-_C.TRAIN.use_aa_loss = False
+# use affinity loss to guide SSSR
+_C.TRAIN.aff_loss = ""
 # weight balance
 _C.TRAIN.w_1 = 1.0
 _C.TRAIN.w_2 = 0.1
