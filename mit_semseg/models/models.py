@@ -1,7 +1,7 @@
 import numpy as np
 import torch
 import torch.nn as nn
-from . import resnet, resnext, mobilenet, hrnet, swintransformer
+from . import resnet, resnext, mobilenet, hrnet, swintransformer, espnet
 from mit_semseg.lib.nn import SynchronizedBatchNorm2d
 from mit_semseg.lib.utils.calculate_psnr_ssim import Postprocess
 BatchNorm2d = SynchronizedBatchNorm2d
@@ -275,6 +275,9 @@ class ModelBuilder:
             net_encoder = Resnet(orig_resnext) # we can still use class Resnet
         elif arch == 'hrnetv2':
             net_encoder = hrnet.__dict__['hrnetv2'](pretrained=pretrained)
+        elif arch == "espnetv2":
+            orig_espnet = espnet.__dict__['espnetv2'](pretrained=pretrained)
+            net_encoder = ESPNetv2(orig_espnet)
         elif arch == 'swin_t':
             orig_swin = swintransformer.__dict__['swin_t'](pretrained=pretrained)
             net_encoder = SwinTransformer(orig_swin)
@@ -326,6 +329,11 @@ class ModelBuilder:
                 fc_dim=fc_dim,
                 use_softmax=use_softmax,
                 fpn_dim=512)
+        elif arch == "espnetv2":
+            net_decoder = espnet.ESPNetv2Decoder(
+                head="SSSR",
+                num_class=num_class,
+                use_softmax=use_softmax)
         elif arch == 'swin_t_v1':
             net_decoder = swintransformer.SwinTransformerDecoder(
                 head="SSSR",
@@ -344,6 +352,18 @@ class ModelBuilder:
                 num_class=num_class,
                 use_softmax=use_softmax,
                 version="v3")
+        elif arch == 'swin_t_v4':
+            net_decoder = swintransformer.SwinTransformerDecoder(
+                head="SSSR",
+                num_class=num_class,
+                use_softmax=use_softmax,
+                version="v4")
+        elif arch == 'swin_t_v5':
+            net_decoder = swintransformer.SwinTransformerDecoder(
+                head="SSSR",
+                num_class=num_class,
+                use_softmax=use_softmax,
+                version="v5")
         else:
             raise Exception('Architecture undefined!')
 
@@ -358,7 +378,10 @@ class ModelBuilder:
     @staticmethod
     def build_decoder_sr(arch='swin_t', weights=''):
         arch = arch.lower()
-        if arch == 'swin_t_v1':
+        if arch == "espnetv2":
+            net_decoder_sisr = espnet.ESPNetv2Decoder(
+                head="SISR")
+        elif arch == 'swin_t_v1':
             net_decoder_sisr = swintransformer.SwinTransformerDecoder(
                 head="SISR",
                 version="v1")
@@ -370,6 +393,14 @@ class ModelBuilder:
             net_decoder_sisr = swintransformer.SwinTransformerDecoder(
                 head="SISR",
                 version="v3")
+        elif arch == 'swin_t_v4':
+            net_decoder_sisr = swintransformer.SwinTransformerDecoder(
+                head="SISR",
+                version="v4")
+        elif arch == 'swin_t_v5':
+            net_decoder_sisr = swintransformer.SwinTransformerDecoder(
+                head="SISR",
+                version="v5")
         else:
             raise Exception('Architecture undefined!')
         
@@ -545,6 +576,51 @@ class MobileNetV2Dilated(nn.Module):
 
         else:
             return [self.features(x)]
+
+
+class ESPNetv2(nn.Module):
+    def __init__(self, orig_net):
+        super(ESPNetv2, self).__init__()
+
+        self.input_reinforcement = orig_net.input_reinforcement
+        self.level1 = orig_net.level1
+        self.level2_0 = orig_net.level2_0
+        self.level3_0 = orig_net.level3_0
+        self.level3 = orig_net.level3
+        self.level4_0 = orig_net.level4_0
+        self.level4 = orig_net.level4
+
+    def forward(self, x, return_feature_maps=False):
+        conv_out = []
+
+        out_l1 = self.level1(x)  # 112
+        if not self.input_reinforcement:
+            del x
+            x = None
+        conv_out.append(out_l1)
+
+        out_l2 = self.level2_0(out_l1, x)  # 56
+        conv_out.append(out_l2)
+
+        out_l3_0 = self.level3_0(out_l2, x)  # down-sample
+        for i, layer in enumerate(self.level3):
+            if i == 0:
+                out_l3 = layer(out_l3_0)
+            else:
+                out_l3 = layer(out_l3)
+        conv_out.append(out_l3)
+
+        out_l4_0 = self.level4_0(out_l3, x)  # down-sample
+        for i, layer in enumerate(self.level4):
+            if i == 0:
+                out_l4 = layer(out_l4_0)
+            else:
+                out_l4 = layer(out_l4)
+        conv_out.append(out_l4)
+
+        if return_feature_maps:
+            return conv_out
+        return [out_l4]
 
         
 class SwinTransformer(nn.Module):
