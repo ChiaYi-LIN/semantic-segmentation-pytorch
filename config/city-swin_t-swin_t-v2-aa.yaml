@@ -1,0 +1,46 @@
+DATASET:
+  root_dataset: "./data/cityscapes/"
+  list_train: "./data/cityscapes/train.odgt"
+  list_val: "./data/cityscapes/val.odgt"
+  num_class: 19
+  imgSizes: (256, )
+  imgMaxSize: 2048
+  padding_constant: 1
+  segm_downsampling_rate: 1
+  random_flip: True
+  square_crop: False
+
+MODEL:
+  arch_encoder: "swin_t"
+  arch_decoder_ss: "swin_t_v2"
+  arch_decoder_sr: "swin_t_v2"
+  fc_dim: 768
+
+TRAIN:
+  batch_size_per_gpu: 2
+  num_epoch: 20
+  start_epoch: 0
+  epoch_iters: 5000
+  optim: "AdamW"
+  lr_encoder: 6e-5
+  lr_decoder: 6e-5
+  lr_pow: 0.9
+  weight_decay: 1e-2
+  fix_bn: False
+  workers: 16
+  disp_iter: 20
+  seed: 304
+  aff_loss: "aa"
+  w_1: 1.0
+  w_2: 0.1
+  w_3: 1.0
+
+VAL:
+  visualize: False
+  checkpoint: "epoch_20.pth"
+
+TEST:
+  checkpoint: "epoch_20.pth"
+  result: "./"
+
+DIR: "ckpt/city-swin_t-swin_t-v2-aa-20epoch"
