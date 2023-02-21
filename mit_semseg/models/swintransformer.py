@@ -110,10 +110,12 @@ class SwinTransformerDecoder(nn.Module):
         stochastic_depth_prob: float = 0.0,
         norm_layer: Optional[Callable[..., nn.Module]] = None,
         block: Optional[Callable[..., nn.Module]] = None,
-        fpn_dim: int = 256,
+        version: str = "v1",
     ):
         super(SwinTransformerDecoder, self).__init__()
         self.use_softmax = use_softmax
+        self.head = head
+        self.version = version
 
         if block is None:
             block = SASwinTransformerBlock
@@ -150,72 +152,155 @@ class SwinTransformerDecoder(nn.Module):
             layers.append(nn.Sequential(*stage))
             # add patch splitting layer
             if i_stage < (len(depths) - 1):
-                layers.append(TransformerUpsample(dim, norm_layer))
+                layers.append(TransformerPixelShuffle(in_dim=dim, out_dim=dim // 2, up_scale=2))
 
         self.body = nn.Sequential(*layers)
-        self.norm4 = norm_layer(8 * embed_dim)
-        self.norm3 = norm_layer(4 * embed_dim)
-        self.norm2 = norm_layer(2 * embed_dim)
-        self.norm1 = norm_layer(embed_dim)
+
+        if version in ["v2", "v3", "v5"]:
+            self.encode3_proj = nn.Sequential(
+                nn.Linear(embed_dim * 4, embed_dim * 4),
+                nn.GELU()
+            )
+            self.encode2_proj = nn.Sequential(
+                nn.Linear(embed_dim * 2, embed_dim * 2),
+                nn.GELU()
+            )
+            self.encode1_proj = nn.Sequential(
+                nn.Linear(embed_dim, embed_dim),
+                nn.GELU()
+            )
+
+        if version == "v4":
+            self.reduction3 = nn.Sequential(
+                nn.Linear(embed_dim * 8, embed_dim * 4),
+                nn.GELU()
+            )
+            self.reduction2 = nn.Sequential(
+                nn.Linear(embed_dim * 4, embed_dim * 2),
+                nn.GELU()
+            )
+            self.reduction1 = nn.Sequential(
+                nn.Linear(embed_dim * 2, embed_dim),
+                nn.GELU()
+            )
+
+        if version == "v3":
+            self.reduction = MLP(sum(stage_dims), [embed_dim, embed_dim], activation_layer=nn.GELU, inplace=None)
+
+        if version in ["v1", "v2", "v3", "v4"]:
+            self.upsample = nn.Sequential(
+                    nn.GELU(),
+                    TransformerPixelShuffle(in_dim=embed_dim, out_dim=embed_dim, up_scale=2),
+                    TransformerPixelShuffle(in_dim=embed_dim, out_dim=embed_dim, up_scale=2),
+                    TransformerPixelShuffle(in_dim=embed_dim, out_dim=embed_dim, up_scale=2),
+            )
+
+            if head == "SSSR":
+                self.last = SwinTransformerDecoderSSSRHead(in_dim=embed_dim, num_class=num_class, use_softmax=use_softmax)
+            elif head == "SISR":
+                self.last = SwinTransformerDecoderSISRHead(in_dim=embed_dim, out_channel=3)
+            else:
+                raise Exception("Invalid decoder head")
+            
+        elif version == "v5":
+            if head == "SSSR":
+                self.upsample = nn.Sequential(
+                    nn.GELU(),
+                    TransformerPixelShuffle(in_dim=embed_dim, out_dim=embed_dim, up_scale=2),
+                    TransformerPixelShuffle(in_dim=embed_dim, out_dim=embed_dim, up_scale=2),
+                    TransformerPixelShuffle(in_dim=embed_dim, out_dim=embed_dim // 2, up_scale=2),
+                    TransformerPixelShuffle(in_dim=embed_dim // 2, out_dim=num_class, up_scale=2),
+                )
+                self.last = SwinTransformerDecoderSSSRHead(in_dim=num_class, num_class=num_class, use_softmax=use_softmax)
+            elif head == "SISR":
+                self.upsample = nn.Sequential(
+                    nn.GELU(),
+                    TransformerPixelShuffle(in_dim=embed_dim, out_dim=embed_dim, up_scale=2),
+                    TransformerPixelShuffle(in_dim=embed_dim, out_dim=embed_dim, up_scale=2),
+                    TransformerPixelShuffle(in_dim=embed_dim, out_dim=embed_dim // 2, up_scale=2),
+                    TransformerPixelShuffle(in_dim=embed_dim // 2, out_dim=3, up_scale=2),
+                )
+                self.last = SwinTransformerDecoderSISRHead(in_dim=3, out_channel=3)
+            else:
+                raise Exception("Invalid decoder head")
         
-        if head == "SSSR":
-            self.last = SwinTransformerDecoderSSSRHead(in_dim=sum(stage_dims), num_class=num_class, use_softmax=use_softmax, hidden_dim=fpn_dim, norm_layer=norm_layer)
-        elif head == "SISR":
-            self.last = SwinTransformerDecoderSISRHead(in_dim=sum(stage_dims), out_channel=3, hidden_dim=fpn_dim, norm_layer=norm_layer)
-        else:
-            raise Exception("Invalid decoder head")
         
-    def forward(self, feat_out, segSize=None):
+        
+    def forward(self, feat_out, segSize=None, return_feature_maps=False):
         assert(len(feat_out) == 4)
         encode1, encode2, encode3, encode4 = feat_out
         encode1, encode2, encode3, encode4 = encode1.permute(0, 2, 3, 1), encode2.permute(0, 2, 3, 1), encode3.permute(0, 2, 3, 1), encode4.permute(0, 2, 3, 1)
-        
-        decode4 = self.body[0](encode4)   
-        decode3 = self.body[2](self.body[1](decode4, target_size=(encode3.shape[1], encode3.shape[2])) + encode3)
-        decode2 = self.body[4](self.body[3](decode3, target_size=(encode2.shape[1], encode2.shape[2])) + encode2)
-        decode1 = self.body[6](self.body[5](decode2, target_size=(encode1.shape[1], encode1.shape[2])) + encode1)
-        
-        decode4 = self.norm4(decode4)
-        decode3 = self.norm3(decode3)
-        decode2 = self.norm2(decode2)
-        decode1 = self.norm1(decode1)
 
-        fpn_feature_list = [decode1.permute(0, 3, 1, 2), decode2.permute(0, 3, 1, 2), decode3.permute(0, 3, 1, 2), decode4.permute(0, 3, 1, 2)]
-        output_size = fpn_feature_list[0].size()[2:]
-        fusion_list = [fpn_feature_list[0]]
-        for i in range(1, len(fpn_feature_list)):
-            fusion_list.append(nn.functional.interpolate(
-                fpn_feature_list[i],
-                output_size,
-                mode='bilinear', align_corners=False))
-        fusion_out = torch.cat(fusion_list, 1) # N C H W
+        # decode4 = self.body[0](encode4)   
+        # decode3 = self.body[2](self.body[1](decode4, target_size=(encode3.shape[1], encode3.shape[2])))
+        # decode2 = self.body[4](self.body[3](decode3, target_size=(encode2.shape[1], encode2.shape[2])))
+        # decode1 = self.body[6](self.body[5](decode2, target_size=(encode1.shape[1], encode1.shape[2])))
         
-        x = self.last(fusion_out, segSize)
+        if self.version == "v1":
+            decode4 = self.body[0](encode4)   
+            decode3 = self.body[2](self.body[1](decode4))
+            decode2 = self.body[4](self.body[3](decode3))
+            decode1 = self.body[6](self.body[5](decode2))
 
-        return x
+        elif self.version in ["v2", "v3", "v5"]:
+            # Skip Connections (Add)
+            decode4 = self.body[0](encode4)   
+            decode3 = self.body[2](self.body[1](decode4) + self.encode3_proj(encode3))
+            decode2 = self.body[4](self.body[3](decode3) + self.encode2_proj(encode2))
+            decode1 = self.body[6](self.body[5](decode2) + self.encode1_proj(encode1))
+
+        elif self.version == "v4":
+            # Skip Connections (Concatenate)
+            decode4 = self.body[0](encode4)   
+            decode3 = self.body[2](self.reduction3(torch.cat([self.body[1](decode4), encode3], dim=-1)))
+            decode2 = self.body[4](self.reduction2(torch.cat([self.body[3](decode3), encode2], dim=-1)))
+            decode1 = self.body[6](self.reduction1(torch.cat([self.body[5](decode2), encode1], dim=-1)))
+
+        
+        if self.version in ["v1", "v2", "v4", "v5"]:
+            upsample_out = self.upsample(decode1)
+            x = self.last(upsample_out.permute(0, 3, 1, 2), segSize)
+
+            if return_feature_maps:
+                return x, decode1
+            else:
+                return x
+        
+        elif self.version == "v3":
+            # FPN like
+            fpn_feature_list = [decode1.permute(0, 3, 1, 2), decode2.permute(0, 3, 1, 2), decode3.permute(0, 3, 1, 2), decode4.permute(0, 3, 1, 2)]
+            output_size = fpn_feature_list[0].size()[2:]
+            fusion_list = [fpn_feature_list[0]]
+            for i in range(1, len(fpn_feature_list)):
+                fusion_list.append(nn.functional.interpolate(
+                    fpn_feature_list[i],
+                    output_size,
+                    mode='bilinear', align_corners=False))
+            fusion_out = torch.cat(fusion_list, 1) # N C H W
+            
+            reduce_out = self.reduction(fusion_out.permute(0, 2, 3, 1))
+            upsample_out = self.upsample(reduce_out)
+            x = self.last(upsample_out.permute(0, 3, 1, 2), segSize)
+
+            if return_feature_maps:
+                return x, reduce_out
+            else:
+                return x
 
 
 class SwinTransformerDecoderSSSRHead(nn.Module):
-    def __init__(self, in_dim, num_class, use_softmax, hidden_dim, norm_layer: Optional[Callable[..., nn.Module]] = None) -> None:
+    def __init__(self, in_dim, num_class, use_softmax) -> None:
         super().__init__()
         self.use_softmax = use_softmax
 
-        if norm_layer is None:
-            norm_layer = partial(nn.LayerNorm, eps=1e-5)
-
-        self.layers = nn.Sequential(
-                nn.Linear(in_dim, hidden_dim),
-                norm_layer(hidden_dim),
-                nn.ReLU(inplace=True),
-                nn.Linear(hidden_dim, num_class),
-        )
+        self.conv_last = nn.Conv2d(in_dim, num_class, kernel_size=3, stride=1, padding=1)
     
     def forward(self, x, segSize=None):
         """
         input: N, C, H, W
         output: N, C, H, W
         """
-        x = self.layers(x.permute(0, 2, 3, 1)).permute(0, 3, 1, 2)
+        x = self.conv_last(x)
         if x.shape[2] != segSize[0] or x.shape[3] != segSize[1]:
             x = nn.functional.interpolate(x, size=segSize, mode='bilinear', align_corners=False)
 
@@ -229,35 +314,61 @@ class SwinTransformerDecoderSSSRHead(nn.Module):
     
 
 class SwinTransformerDecoderSISRHead(nn.Module):
-    def __init__(self, in_dim, out_channel, hidden_dim, norm_layer: Optional[Callable[..., nn.Module]] = None) -> None:
+    def __init__(self, in_dim, out_channel) -> None:
         super().__init__()
-        if norm_layer is None:
-            norm_layer = partial(nn.LayerNorm, eps=1e-5)
-        scale = 4
-        assert(in_dim % (scale ** 2) == 0)
-        self.upsample = nn.Sequential(
-                nn.Conv2d(in_channels=in_dim, out_channels=in_dim, kernel_size=3, stride=1, padding=1),
-                nn.PixelShuffle(scale),
-        )
-        self.layers = nn.Sequential(
-                nn.Linear(in_dim // (scale ** 2), hidden_dim),
-                norm_layer(hidden_dim),
-                nn.ReLU(inplace=True),
-                nn.Linear(hidden_dim, out_channel),
-        )
-
+        
+        self.conv_last = nn.Conv2d(in_dim, out_channel, kernel_size=3, stride=1, padding=1)
+        
     def forward(self, x: Tensor, segSize: tuple = None):
         """
         input: N, C, H, W
         output: N, C, H, W
         """
-        x = self.upsample(x)
-        x = self.layers(x.permute(0, 2, 3, 1)).permute(0, 3, 1, 2)
+        x = self.conv_last(x)
         if x.shape[2] != segSize[0] or x.shape[3] != segSize[1]:
-            print(f"WARNING: Shape not match in SISR path, input = {x.shape[2:]} and segSize = {segSize}")
+            # print(f"WARNING: Shape not match in SISR path, input = {x.shape[2:]} and segSize = {segSize}")
             x = nn.functional.interpolate(x, size=segSize, mode='bilinear', align_corners=False)        
 
         return x    
+
+
+class TransformerBilinearMLP(nn.Module):
+    def __init__(self, in_dim, out_dim, up_scale) -> None:
+        super().__init__()
+        # if norm_layer is None:
+        #     norm_layer = partial(nn.LayerNorm, eps=1e-5)
+
+        self.up_scale = up_scale
+        self.mlp = MLP(in_dim, [out_dim, out_dim], activation_layer=nn.GELU, inplace=None)
+
+    def forward(self, x: Tensor):
+        """
+        input: N, C, H, W
+        output: N, C, H, W
+        """
+        x = nn.functional.interpolate(x, scale_factor=self.up_scale, mode='bilinear', align_corners=False)
+        x = self.mlp(x.permute(0, 2, 3, 1)).permute(0, 3, 1, 2)
+
+        return x
+
+
+class TransformerPixelShuffle(nn.Module):
+    def __init__(self, in_dim, out_dim, up_scale) -> None:
+        super().__init__()
+        self.upsample = nn.Sequential(
+            nn.Conv2d(in_dim, (up_scale ** 2) * out_dim, kernel_size=3, stride=1, padding=1),
+            nn.PixelShuffle(up_scale),
+            nn.GELU(),
+        )
+
+    def forward(self, x: Tensor):
+        """
+        input: N, H, W, C
+        output: N, H, W, C
+        """
+        x = self.upsample(x.permute(0, 3, 1, 2)).permute(0, 2, 3, 1)
+
+        return x
 
 
 class TransformerUpsample(nn.Module):
@@ -269,7 +380,6 @@ class TransformerUpsample(nn.Module):
 
     def __init__(self, dim: int, norm_layer: Callable[..., nn.Module] = nn.LayerNorm):
         super().__init__()
-        self.dim = dim
         self.reduction = nn.Linear(dim, dim // 2, bias=False)
         self.norm = norm_layer(dim)
 
@@ -284,7 +394,7 @@ class TransformerUpsample(nn.Module):
         x = x.permute(0, 3, 1, 2)
         N, C, H, W = x.shape
         if target_size is None:
-            x = nn.functional.interpolate(x, size=(H * 2, W * 2), mode='bilinear', align_corners=False)
+            x = nn.functional.interpolate(x, scale_factor=2, mode='bilinear', align_corners=False)
         else:
             x = nn.functional.interpolate(x, size=target_size, mode='bilinear', align_corners=False)
         x = self.norm(x.permute(0, 2, 3, 1))
