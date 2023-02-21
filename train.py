@@ -136,6 +136,16 @@ def group_weight(module):
             group_no_decay.append(m.relative_position_bias_table)
         elif isinstance(m, SAShiftedWindowAttention):
             group_no_decay.append(m.relative_position_bias_table)
+        else:
+            try:
+                group_no_decay.append(m.weight)
+            except:
+                pass
+
+            try:
+                group_no_decay.append(m.bias)
+            except:
+                pass
 
     assert len(list(module.parameters())) == len(group_decay) + len(group_no_decay)
     groups = [dict(params=group_decay), dict(params=group_no_decay, weight_decay=.0)]
@@ -148,13 +158,13 @@ def create_optimizers(nets, cfg):
         optimizer_encoder = torch.optim.SGD(
             group_weight(net_encoder),
             lr=cfg.TRAIN.lr_encoder,
-            momentum=cfg.TRAIN.momentum,
+            momentum=cfg.TRAIN.beta1,
             weight_decay=cfg.TRAIN.weight_decay)
         if net_decoder_ss is not None:
             optimizer_decoder_ss = torch.optim.SGD(
                 group_weight(net_decoder_ss),
                 lr=cfg.TRAIN.lr_decoder,
-                momentum=cfg.TRAIN.momentum,
+                momentum=cfg.TRAIN.beta1,
                 weight_decay=cfg.TRAIN.weight_decay)
         else:
             optimizer_decoder_ss = None
@@ -162,7 +172,7 @@ def create_optimizers(nets, cfg):
             optimizer_decoder_sr = torch.optim.SGD(
                 group_weight(net_decoder_sr),
                 lr=cfg.TRAIN.lr_decoder,
-                momentum=cfg.TRAIN.momentum,
+                momentum=cfg.TRAIN.beta1,
                 weight_decay=cfg.TRAIN.weight_decay)
         else:
             optimizer_decoder_sr = None
