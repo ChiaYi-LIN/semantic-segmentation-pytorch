@@ -1,7 +1,7 @@
 import numpy as np
 import torch
 import torch.nn as nn
-from . import resnet, resnext, mobilenet, hrnet, swintransformer, espnet
+from . import resnet, resnext, mobilenet, hrnet, swintransformer, espnet, ssformer
 from mit_semseg.lib.nn import SynchronizedBatchNorm2d
 from mit_semseg.lib.utils.calculate_psnr_ssim import Postprocess
 BatchNorm2d = SynchronizedBatchNorm2d
@@ -364,6 +364,11 @@ class ModelBuilder:
                 num_class=num_class,
                 use_softmax=use_softmax,
                 version="v5")
+        elif arch == 'ssformer':
+            net_decoder = ssformer.SSformerDecoder(
+                head="SSSR",
+                num_class=num_class,
+                use_softmax=use_softmax)
         else:
             raise Exception('Architecture undefined!')
 
@@ -401,6 +406,9 @@ class ModelBuilder:
             net_decoder_sisr = swintransformer.SwinTransformerDecoder(
                 head="SISR",
                 version="v5")
+        elif arch == 'ssformer':
+            net_decoder_sisr = ssformer.SSformerDecoder(
+                head="SISR")
         else:
             raise Exception('Architecture undefined!')
         
