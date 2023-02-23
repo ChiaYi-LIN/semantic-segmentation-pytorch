@@ -12,6 +12,7 @@ from torch import Tensor
 import torch.nn as nn
 from torch.nn import functional as F
 from mit_semseg.models.utils import load_url
+import mit_semseg.models.espnet_utils as esp_util
 
 
 __all__ = ['espnetv2']
@@ -42,6 +43,7 @@ def Deconv_BN_ACT(in_plane, out_plane):
     return nn.Sequential(conv_trans, norm, act)
 
 
+# cnn_utils.py
 def activation_fn(features, name='prelu', inplace=True):
     '''
     :param features: # of features (only for PReLU)
@@ -60,6 +62,7 @@ def activation_fn(features, name='prelu', inplace=True):
         exit()
 
 
+# cnn_utils.py
 class CBR(nn.Module):
     '''
     This class defines the convolution layer with batch normalization and activation function
@@ -90,34 +93,7 @@ class CBR(nn.Module):
         return self.cbr(x)
     
 
-class CB(nn.Module):
-    '''
-    This class implements convolution layer followed by batch normalization
-    '''
-
-    def __init__(self, nIn, nOut, kSize, stride=1, dilation=1, groups=1):
-        '''
-        :param nIn: number of input channels
-        :param nOut: number of output channels
-        :param kSize: kernel size
-        :param stride: stride rate for down-sampling. Default is 1
-        :param groups: # of groups for group-wise convolution
-        '''
-        super().__init__()
-        padding = int((kSize - 1) / 2)*dilation
-        self.cb = nn.Sequential(
-            nn.Conv2d(nIn, nOut, kSize, stride=stride, padding=padding, bias=False, groups=groups, dilation=1),
-            nn.BatchNorm2d(nOut),
-        )
-
-    def forward(self, x):
-        '''
-        :param input: input feature map
-        :return: transformed feature map
-        '''
-        return self.cb(x)
-
-
+# cnn_utils.py
 class BR(nn.Module):
     '''
     This class implements batch normalization and  activation function
@@ -141,6 +117,7 @@ class BR(nn.Module):
         return self.br(x)
 
 
+# cnn_utils.py
 class Shuffle(nn.Module):
     '''
     This class implements Channel Shuffling
@@ -239,33 +216,6 @@ class EfficientPyrPool(nn.Module):
         return out
     
 
-class CDilated(nn.Module):
-    '''
-    This class defines the dilated convolution.
-    '''
-
-    def __init__(self, nIn, nOut, kSize, stride=1, d=1, groups=1):
-        '''
-        :param nIn: number of input channels
-        :param nOut: number of output channels
-        :param kSize: kernel size
-        :param stride: optional stride rate for down-sampling
-        :param d: optional dilation rate
-        '''
-        super().__init__()
-        padding = int((kSize - 1) / 2) * d
-        self.conv = nn.Conv2d(nIn, nOut,kSize, stride=stride, padding=padding, bias=False,
-                              dilation=d, groups=groups)
-
-    def forward(self, input):
-        '''
-        :param input: input feature map
-        :return: transformed feature map
-        '''
-        output = self.conv(input)
-        return output
-    
-
 class EESP(nn.Module):
     '''
     This class defines the EESP block, which is based on the following principle
@@ -287,7 +237,7 @@ class EESP(nn.Module):
         n1 = nOut - (k - 1) * n
         assert down_method in ['avg', 'esp'], 'One of these is suppported (avg or esp)'
         assert n == n1, "n(={}) and n1(={}) should be equal for Depth-wise Convolution ".format(n, n1)
-        self.proj_1x1 = CBR(nIn, n, 1, stride=1, groups=k)
+        self.proj_1x1 = esp_util.CBR(nIn, n, 1, stride=1, groups=k)
 
         # (For convenience) Mapping between dilation rate and receptive field for a 3x3 kernel
         map_receptive_ksize = {3: 1, 5: 2, 7: 3, 9: 4, 11: 5, 13: 6, 15: 7, 17: 8}
@@ -304,10 +254,10 @@ class EESP(nn.Module):
         self.spp_dw = nn.ModuleList()
         for i in range(k):
             d_rate = map_receptive_ksize[self.k_sizes[i]]
-            self.spp_dw.append(CDilated(n, n, kSize=3, stride=stride, groups=n, d=d_rate))
+            self.spp_dw.append(esp_util.CDilated(n, n, kSize=3, stride=stride, groups=n, d=d_rate))
         # Performing a group convolution with K groups is the same as performing K point-wise convolutions
-        self.conv_1x1_exp = CB(nOut, nOut, 1, 1, groups=k)
-        self.br_after_cat = BR(nOut)
+        self.conv_1x1_exp = esp_util.CB(nOut, nOut, 1, 1, groups=k)
+        self.br_after_cat = esp_util.BR(nOut)
         self.module_act = nn.PReLU(nOut)
         self.downAvg = True if down_method == 'avg' else False
 
@@ -370,8 +320,8 @@ class DownSampler(nn.Module):
         config_inp_reinf = 3
         if reinf:
             self.inp_reinf = nn.Sequential(
-                CBR(config_inp_reinf, config_inp_reinf, 3, 1),
-                CB(config_inp_reinf, nout, 1, 1)
+                esp_util.CBR(config_inp_reinf, config_inp_reinf, 3, 1),
+                esp_util.CB(config_inp_reinf, nout, 1, 1)
             )
         self.act =  nn.PReLU(nout)
 
@@ -434,10 +384,6 @@ class ESPNetv2(nn.Module):
         }
         rep_layers = [0, 3, 7, 3]
 
-        # limits for the receptive field at each spatial level
-        recept_limit = [13, 11, 9, 7, 5]
-        branches = 4
-
         if not s in sc_ch_dict.keys():
             print('Model at scale s={} is not suppoerted yet'.format(s))
             exit(-1)
@@ -445,7 +391,9 @@ class ESPNetv2(nn.Module):
         out_channel_map = sc_ch_dict[s]
         reps_at_each_level = rep_layers
 
-        recept_limit = recept_limit  # receptive field at each spatial level
+        # limits for the receptive field at each spatial level
+        recept_limit = [13, 11, 9, 7, 5]  # receptive field at each spatial level
+        branches = 4
         K = [branches]*len(recept_limit) # No. of parallel branches at different level
 
         # True for the shortcut connection with input
@@ -453,7 +401,7 @@ class ESPNetv2(nn.Module):
 
         assert len(K) == len(recept_limit), 'Length of branching factor array and receptive field array should be the same.'
 
-        self.level1 = CBR(channels_in, out_channel_map[0], 3, 2)  # 112 L1
+        self.level1 = esp_util.CBR(channels_in, out_channel_map[0], 3, 2)  # 112 L1
 
         self.level2_0 = DownSampler(out_channel_map[0], out_channel_map[1], k=K[0], r_lim=recept_limit[0], reinf=self.input_reinforcement)  # out = 56
 
@@ -473,8 +421,8 @@ class ESPNetv2(nn.Module):
             self.level5.append(EESP(out_channel_map[4], out_channel_map[4], stride=1, k=K[4], r_lim=recept_limit[4]))
 
         # expand the feature maps using depth-wise convolution followed by group point-wise convolution
-        self.level5.append(CBR(out_channel_map[4], out_channel_map[4], 3, 1, groups=out_channel_map[4]))
-        self.level5.append(CBR(out_channel_map[4], out_channel_map[5], 1, 1, groups=K[4]))
+        self.level5.append(esp_util.CBR(out_channel_map[4], out_channel_map[4], 3, 1, groups=out_channel_map[4]))
+        self.level5.append(esp_util.CBR(out_channel_map[4], out_channel_map[5], 1, 1, groups=K[4]))
 
         self.classifier = nn.Linear(out_channel_map[5], num_class)
         self.config = out_channel_map
